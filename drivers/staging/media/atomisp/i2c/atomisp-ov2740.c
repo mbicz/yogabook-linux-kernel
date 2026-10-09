@@ -762,7 +762,7 @@ static int ov2740_set_fmt(struct v4l2_subdev *sd,
 
 	fmt->code = MEDIA_BUS_FMT_SBGGR10_1X10;
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
-		sd_state->pads->try_fmt = *fmt;
+		*v4l2_subdev_state_get_format(sd_state, 0) = *fmt;
 		mutex_unlock(&dev->input_lock);
 		return 0;
 	}
@@ -1168,8 +1168,9 @@ ov2740_enum_frame_size(struct v4l2_subdev *sd, struct v4l2_subdev_state *sd_stat
 	return 0;
 }
 
-int ov2740_g_frame_interval(struct v4l2_subdev *sd,
-			    struct v4l2_subdev_frame_interval *interval)
+static int ov2740_get_frame_interval(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_frame_interval *interval)
 {
 	struct ov2740_device *dev = to_ov2740_sensor(sd);
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
@@ -1229,7 +1230,6 @@ static const struct v4l2_subdev_sensor_ops ov2740_sensor_ops = {
 
 static const struct v4l2_subdev_video_ops ov2740_video_ops = {
 	.s_stream = ov2740_s_stream,
-	.g_frame_interval = ov2740_g_frame_interval,
 };
 
 static const struct v4l2_subdev_core_ops ov2740_core_ops = {
@@ -1242,6 +1242,7 @@ static const struct v4l2_subdev_pad_ops ov2740_pad_ops = {
 	.enum_frame_size = ov2740_enum_frame_size,
 	.get_fmt = ov2740_get_fmt,
 	.set_fmt = ov2740_set_fmt,
+	.get_frame_interval = ov2740_get_frame_interval,
 };
 
 static const struct v4l2_subdev_ops ov2740_ops = {
@@ -1345,7 +1346,7 @@ static int ov2740_probe(struct i2c_client *client)
 
 //	global_dev = dev;
 
-	return atomisp_register_i2c_module(&dev->sd, pdata, RAW_CAMERA);
+	return atomisp_register_i2c_module(&dev->sd, pdata);
 
 out_ctrl_handler_free:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
