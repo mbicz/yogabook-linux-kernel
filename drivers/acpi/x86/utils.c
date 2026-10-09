@@ -470,6 +470,9 @@ static const struct acpi_device_id i2c_acpi_known_good_ids[] = {
 	{ "INT33FD", 0 },  /* Intel Crystal Cove PMIC */
 	{ "INT34D3", 0 },  /* Intel Whiskey Cove PMIC */
 	{ "NPCE69A", 0 },  /* Asus Transformer keyboard dock */
+	{ "INT33BE", 0 },  /* OmniVision OV8858 (Lenovo Yoga Book rear camera) */
+	{ "INT33FB", 0 },  /* OmniVision OV2740 (Lenovo Yoga Book YB1-X90F front camera) */
+	{ "INT33F8", 0 },  /* GalaxyCore GC2235 (Lenovo Yoga Book camera placeholders) */
 	{}
 };
 

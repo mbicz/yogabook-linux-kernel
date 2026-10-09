@@ -1253,6 +1253,9 @@ static const struct v4l2_subdev_ops ov2740_ops = {
 
 static const struct acpi_device_id ov2740_acpi_match[] = {
 	{"INT33BE"},
+	{"INT33FB"},	/* Lenovo Yoga Book YB1-X90F: OV2740 front camera with
+			 * the OV2722 _HID; the ov2722 driver must stay off or
+			 * its detect() fails the bind */
 	{"OVTI2740"},
 	{},
 };
