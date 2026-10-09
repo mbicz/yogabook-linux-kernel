@@ -540,19 +540,19 @@ static int power_ctrl(struct v4l2_subdev *sd, int flag)
 		usleep_range(1000, 1500);
 
 	} else {
-		ret = dev->platform_data->v1p2_ctrl(sd, 1);
+		ret = dev->platform_data->v1p2_ctrl(sd, 0);
 		if (ret)
 			goto err;
 
 		usleep_range(1000, 1500);
 
-		ret = dev->platform_data->v1p8_ctrl(sd, 1);
+		ret = dev->platform_data->v1p8_ctrl(sd, 0);
 		if (ret)
 			goto err;
 
 		usleep_range(1000, 1500);
 
-		ret = dev->platform_data->v2p8_ctrl(sd, 1);
+		ret = dev->platform_data->v2p8_ctrl(sd, 0);
 		if (ret)
 			goto err;
 	}
@@ -1253,7 +1253,6 @@ static const struct v4l2_subdev_ops ov2740_ops = {
 };
 
 static const struct acpi_device_id ov2740_acpi_match[] = {
-	{"INT33BE"},
 	{"INT33FB"},	/* Lenovo Yoga Book YB1-X90F: OV2740 front camera with
 			 * the OV2722 _HID; the ov2722 driver must stay off or
 			 * its detect() fails the bind */
@@ -1351,6 +1350,7 @@ static int ov2740_probe(struct i2c_client *client)
 out_ctrl_handler_free:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
 out_free:
+	atomisp_gmin_remove_subdev(&dev->sd);
 	v4l2_device_unregister_subdev(&dev->sd);
 	kfree(dev);
 	return ret;

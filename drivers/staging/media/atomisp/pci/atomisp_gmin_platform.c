@@ -1111,6 +1111,10 @@ gmin_camera_platform_data(struct v4l2_subdev *subdev,
 	struct gmin_subdev *gs;
 
 	gs = find_free_gmin_subdev_slot();
+	if (!gs) {
+		dev_err(subdev->dev, "no free gmin subdev slot\n");
+		return NULL;
+	}
 	gs->subdev = subdev;
 	gs->csi_fmt = csi_format;
 	gs->csi_bayer = csi_bayer;
