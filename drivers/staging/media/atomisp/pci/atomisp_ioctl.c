@@ -42,7 +42,17 @@ static struct v4l2_query_ext_ctrl ci_v4l2_controls[] = {
 		.minimum = 0,
 		.maximum = 1,
 		.step = 1,
-		.default_value = 0,
+		.default_value = 1,
+	},
+	{
+		.id = V4L2_CID_EXPOSURE_AUTO,
+		.type = V4L2_CTRL_TYPE_MENU,
+		.name = "Auto Exposure",
+		.minimum = 0,
+		.maximum = 1,
+		.step = 1,
+		.default_value = V4L2_EXPOSURE_AUTO,
+		.flags = V4L2_CTRL_FLAG_UPDATE,
 	},
 	{
 		.id = V4L2_CID_RED_BALANCE,
@@ -939,6 +949,12 @@ int atomisp_start_streaming(struct vb2_queue *vq, unsigned int count)
 	mutex_lock(&isp->media_dev.graph_mutex);
 	atomisp_setup_input_links(isp);
 	ret = __media_pipeline_start(&asd->video_out.vdev.entity.pads[0], &asd->video_out.pipe);
+	/*
+	 * Stream (re)start resets the ISP parameter set, so the 3A loop must
+	 * forget the last applied gains and push them again.
+	 */
+	asd->awb_r = 0;
+	asd->awb_b = 0;
 	mutex_unlock(&isp->media_dev.graph_mutex);
 	if (ret) {
 		dev_err(isp->dev, "Error starting mc pipeline: %d\n", ret);
@@ -1049,6 +1065,15 @@ static int atomisp_g_ctrl(struct file *file, void *fh,
 		return ret;
 
 	switch (control->id) {
+	case V4L2_CID_AUTO_WHITE_BALANCE:
+		control->value = asd->awb_en;
+		ret = 0;
+		break;
+	case V4L2_CID_EXPOSURE_AUTO:
+		control->value = asd->ae_en ? V4L2_EXPOSURE_AUTO :
+					      V4L2_EXPOSURE_MANUAL;
+		ret = 0;
+		break;
 	case V4L2_CID_COLORFX:
 		ret = atomisp_color_effect(asd, 0, &control->value);
 		break;
@@ -1101,6 +1126,14 @@ static int atomisp_s_ctrl(struct file *file, void *fh,
 		return ret;
 
 	switch (control->id) {
+	case V4L2_CID_AUTO_WHITE_BALANCE:
+		asd->awb_en = !!control->value;
+		ret = 0;
+		break;
+	case V4L2_CID_EXPOSURE_AUTO:
+		asd->ae_en = control->value == V4L2_EXPOSURE_AUTO;
+		ret = 0;
+		break;
 	case V4L2_CID_COLORFX:
 		ret = atomisp_color_effect(asd, 1, &control->value);
 		break;
@@ -1127,6 +1160,23 @@ static int atomisp_s_ctrl(struct file *file, void *fh,
 		break;
 	}
 	return ret;
+}
+
+/*
+ * Enumerate the menu items of menu-type controls.
+ */
+static int atomisp_querymenu(struct file *file, void *fh,
+			     struct v4l2_querymenu *qm)
+{
+	switch (qm->id) {
+	case V4L2_CID_EXPOSURE_AUTO:
+		if (qm->index > V4L2_EXPOSURE_MANUAL)
+			break;
+		strscpy(qm->name, qm->index == V4L2_EXPOSURE_AUTO ?
+			"Auto" : "Manual", sizeof(qm->name));
+		return 0;
+	}
+	return -EINVAL;
 }
 
 /*
@@ -1556,6 +1606,7 @@ const struct v4l2_ioctl_ops atomisp_ioctl_ops = {
 	.vidioc_g_input = atomisp_g_input,
 	.vidioc_s_input = atomisp_s_input,
 	.vidioc_query_ext_ctrl = atomisp_query_ext_ctrl,
+	.vidioc_querymenu = atomisp_querymenu,
 	.vidioc_s_ext_ctrls = atomisp_s_ext_ctrls,
 	.vidioc_g_ext_ctrls = atomisp_g_ext_ctrls,
 	.vidioc_enum_framesizes   = atomisp_enum_framesizes,
