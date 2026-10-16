@@ -251,12 +251,75 @@ static int intel_cht_wc_exec_mipi_pmic_seq_element(struct regmap *regmap,
 }
 
 /*
- * The thermal table and ops are empty, we do not support the Thermal opregion
- * (DPTF) due to lacking documentation.
+ * System thermistor registers and current-source conversion are documented by
+ * Lenovo's Yoga Book Android driver, intel_soc_pmic_wc_opregion.c. Request a
+ * fresh thermal-group conversion: firmware does not necessarily leave periodic
+ * sampling enabled. The opregion mutex serializes these ADC transactions.
+ *
+ * Keep interrupt masks, monitor periods, alert thresholds and power rails
+ * unchanged. Completion is polled while the ADC interrupt remains masked.
  */
+#define CHT_WC_ADC_REQUEST	0x4f02
+#define CHT_WC_ADC_IRQ		0x6e08
+#define CHT_WC_ADC_THERMAL	BIT(3)
+#define CHT_WC_ADC_DONE		BIT(2)
+
+static const struct pmic_table thermal_table[] = {
+	{ .address = 0x00, .reg = 0x4f39 }, /* TMP0: system thermistor 0 */
+	{ .address = 0x0c, .reg = 0x4f3b }, /* TMP1: system thermistor 1 */
+	{ .address = 0x18, .reg = 0x4f3d }, /* TMP2: system thermistor 2 */
+};
+
+static int intel_cht_wc_pmic_get_raw_temp(struct regmap *regmap, int reg)
+{
+	static const unsigned int resistance_lsb[] = {
+		0, 260420, 130210, 65100, 32550, 16280,
+		8140, 4070, 2030, 0, 260420, 130210,
+	};
+	unsigned int value, high, low, source, raw;
+	int ret;
+
+	ret = regmap_read_poll_timeout(regmap, CHT_WC_ADC_REQUEST, value,
+				      !(value & BIT(0)), 2000, 1000000);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(regmap, CHT_WC_ADC_IRQ, CHT_WC_ADC_DONE);
+	if (ret)
+		return ret;
+	ret = regmap_write(regmap, CHT_WC_ADC_REQUEST, CHT_WC_ADC_THERMAL);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(regmap, CHT_WC_ADC_IRQ, value,
+				      value & CHT_WC_ADC_DONE, 2000, 1000000);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(regmap, reg - 1, &high);
+	if (ret)
+		return ret;
+	ret = regmap_read(regmap, reg, &low);
+	if (ret)
+		return ret;
+
+	source = high >> 4;
+	if (source >= ARRAY_SIZE(resistance_lsb) || !resistance_lsb[source])
+		return -ENODATA;
+
+	raw = ((high & 0x0f) << 8) | low;
+	if (!raw || raw == 0x0fff)
+		return -ENODATA;
+
+	/* PMIC LPAT uses resistance in ohms, temperatures in decikelvin. */
+	return raw * resistance_lsb[source] / 1000;
+}
+
 static const struct intel_pmic_opregion_data intel_cht_wc_pmic_opregion_data = {
 	.get_power		= intel_cht_wc_pmic_get_power,
 	.update_power		= intel_cht_wc_pmic_update_power,
+	.get_raw_temp		= intel_cht_wc_pmic_get_raw_temp,
+	.thermal_table		= thermal_table,
+	.thermal_table_count	= ARRAY_SIZE(thermal_table),
 	.exec_mipi_pmic_seq_element = intel_cht_wc_exec_mipi_pmic_seq_element,
 	.lpat_raw_to_temp	= acpi_lpat_raw_to_temp,
 	.power_table		= power_table,
