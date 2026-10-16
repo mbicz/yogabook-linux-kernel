@@ -247,8 +247,10 @@ static int cht_wc_leds_set_effect(struct led_classdev *cdev,
 
 	ret = regmap_update_bits(led->regmap, led->regs->fsm,
 				 CHT_WC_LED_EFF_MASK, effect);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_err(cdev->dev, "Failed to update LED FSM reg: %d\n", ret);
+		goto done;
+	}
 
 	/* Set the frequency and make sure the LED is on */
 	ret = regmap_update_bits(led->regmap, led->regs->ctrl,
@@ -373,7 +375,7 @@ static int cht_wc_leds_probe(struct platform_device *pdev)
 		leds->leds[0].cdev.default_trigger = "bq27520-0-charging-blink-full-solid";
 		break;
 	case INTEL_CHT_WC_LENOVO_YOGABOOK1:
-		leds->leds[0].cdev.default_trigger = "bq27542-0-charging-blink-full-solid";
+		/* The edge LED is power/sleep status; LED2 is the pen icon. */
 		break;
 	default:
 		dev_warn(&pdev->dev, "Unknown model, no default charging trigger\n");
@@ -397,6 +399,17 @@ static int cht_wc_leds_probe(struct platform_device *pdev)
 		ret = devm_led_classdev_register(&pdev->dev, &led->cdev);
 		if (ret < 0)
 			return ret;
+
+		if (pmic->cht_wc_model == INTEL_CHT_WC_LENOVO_YOGABOOK1 && i == 0) {
+			mutex_lock(&led->cdev.led_access);
+			ret = led_set_brightness_sync(&led->cdev, LED_OFF);
+			if (!ret)
+				ret = led_set_brightness_sync(&led->cdev, LED_FULL);
+			mutex_unlock(&led->cdev.led_access);
+			if (ret < 0)
+				return dev_err_probe(&pdev->dev, ret,
+						     "Setting awake status LED\n");
+		}
 	}
 
 	platform_set_drvdata(pdev, leds);
@@ -425,30 +438,70 @@ static void cht_wc_leds_disable(struct platform_device *pdev)
 		cht_wc_led_restore_regs(&leds->leds[0], &leds->led1_initial_regs);
 }
 
-/* On suspend save current settings and turn LEDs off */
+/* Save awake settings; Yoga Book's edge LED breathes autonomously in suspend. */
 static int cht_wc_leds_suspend(struct device *dev)
 {
 	struct cht_wc_leds *leds = dev_get_drvdata(dev);
+	struct intel_soc_pmic *pmic = dev_get_drvdata(dev->parent);
+	struct cht_wc_led *status = &leds->leds[0];
+	unsigned long delay_on = 2000, delay_off = 2000;
+	bool suspend_status = pmic->cht_wc_model == INTEL_CHT_WC_LENOVO_YOGABOOK1;
 	int i, ret;
+
+	/* Drain queued writes before saving state; don't overwrite the sleep effect. */
+	if (suspend_status) {
+		status->cdev.flags |= LED_SUSPENDED;
+		flush_work(&status->cdev.set_brightness_work);
+	}
 
 	for (i = 0; i < CHT_WC_LED_COUNT; i++) {
 		ret = cht_wc_led_save_regs(&leds->leds[i], &leds->leds[i].saved_regs);
 		if (ret < 0)
-			return ret;
+			goto resume_status;
 	}
 
-	cht_wc_leds_disable(to_platform_device(dev));
+	if (!suspend_status) {
+		cht_wc_leds_disable(to_platform_device(dev));
+		return 0;
+	}
+
+	/* Keep software ownership in sleep; shutdown alone restores firmware control. */
+	for (i = 0; i < CHT_WC_LED_COUNT; i++) {
+		ret = cht_wc_leds_brightness_set(&leds->leds[i].cdev, LED_OFF);
+		if (ret < 0)
+			goto restore_leds;
+	}
+
+	if ((status->saved_regs.ctrl & status->regs->on_off_mask) ==
+	    status->regs->on_val) {
+		ret = cht_wc_leds_set_effect(&status->cdev, &delay_on, &delay_off,
+					    CHT_WC_LED_EFF_BREATHING);
+		if (ret < 0)
+			goto restore_leds;
+	}
 	return 0;
+
+restore_leds:
+	for (i = 0; i < CHT_WC_LED_COUNT; i++)
+		cht_wc_led_restore_regs(&leds->leds[i], &leds->leds[i].saved_regs);
+resume_status:
+	if (suspend_status)
+		led_classdev_resume(&status->cdev);
+	return ret;
 }
 
 /* On resume restore the saved settings */
 static int cht_wc_leds_resume(struct device *dev)
 {
 	struct cht_wc_leds *leds = dev_get_drvdata(dev);
+	struct intel_soc_pmic *pmic = dev_get_drvdata(dev->parent);
 	int i;
 
 	for (i = 0; i < CHT_WC_LED_COUNT; i++)
 		cht_wc_led_restore_regs(&leds->leds[i], &leds->leds[i].saved_regs);
+
+	if (pmic->cht_wc_model == INTEL_CHT_WC_LENOVO_YOGABOOK1)
+		led_classdev_resume(&leds->leds[0].cdev);
 
 	return 0;
 }

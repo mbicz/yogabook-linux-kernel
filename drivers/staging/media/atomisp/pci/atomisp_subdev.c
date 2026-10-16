@@ -592,6 +592,11 @@ static void isp_subdev_init_params(struct atomisp_sub_device *asd)
 	unsigned int i;
 
 	/* parameters initialization */
+	/* 3A loop defaults: gray-world AWB and AE on. */
+	asd->awb_en = true;
+	asd->ae_en = true;
+	asd->awb_r = 8192;
+	asd->awb_b = 8192;
 	INIT_LIST_HEAD(&asd->s3a_stats);
 	INIT_LIST_HEAD(&asd->s3a_stats_in_css);
 	INIT_LIST_HEAD(&asd->s3a_stats_ready);

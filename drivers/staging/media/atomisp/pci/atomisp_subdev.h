@@ -255,6 +255,15 @@ struct atomisp_sub_device {
 	struct list_head s3a_stats_in_css;
 	/* The list of s3a stat buffers which are ready for userspace to get */
 	struct list_head s3a_stats_ready;
+	/*
+	 * In-kernel 3A loop state (atomisp_3a_loop.c): gray-world AWB and
+	 * paced AE driven by the s3a statistics.
+	 */
+	bool awb_en;
+	bool ae_en;
+	unsigned int ae_pace;
+	u32 awb_r;
+	u32 awb_b;
 
 	struct list_head dis_stats;
 	struct list_head dis_stats_in_css;

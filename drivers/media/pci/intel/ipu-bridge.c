@@ -5,6 +5,7 @@
 #include <acpi/acpi_bus.h>
 #include <linux/cleanup.h>
 #include <linux/device.h>
+#include <linux/dmi.h>
 #include <linux/i2c.h>
 #include <linux/mei_cl_bus.h>
 #include <linux/platform_device.h>
@@ -60,6 +61,8 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
 	IPU_SENSOR_CONFIG("INT33BE", 1, 419200000),
 	/* Onsemi MT9M114 */
 	IPU_SENSOR_CONFIG("INT33F0", 1, 384000000),
+	/* Omnivision OV2740 (Lenovo Yoga Book YB1-X90F front camera) */
+	IPU_SENSOR_CONFIG("INT33FB", 1, 180000000),
 	/* Omnivision OV2740 */
 	IPU_SENSOR_CONFIG("INT3474", 1, 180000000),
 	/* Omnivision OV5670 */
@@ -93,6 +96,10 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
 	/* Toshiba T4KA3 */
 	IPU_SENSOR_CONFIG("XMCC0003", 1, 321468000),
 };
+
+/* This board uses the OV5693 HID for an OV8858 clocked at 19.2 MHz. */
+static const struct ipu_sensor_config yogabook_ov8858_config =
+	IPU_SENSOR_CONFIG("INT33BE", 1, 288000000);
 
 static const struct ipu_property_names prop_names = {
 	.clock_frequency = "clock-frequency",
@@ -330,6 +337,12 @@ static void ipu_bridge_create_fwnode_properties(
 {
 	struct ipu_property_names *names = &sensor->prop_names;
 	struct software_node *nodes = sensor->swnodes;
+
+	if (!strcmp(cfg->hid, "INT33BE") &&
+	    dmi_match(DMI_SYS_VENDOR, "Intel Corporation") &&
+	    dmi_match(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM") &&
+	    dmi_match(DMI_PRODUCT_VERSION, "YETI-11"))
+		cfg = &yogabook_ov8858_config;
 
 	sensor->prop_names = prop_names;
 

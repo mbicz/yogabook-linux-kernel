@@ -701,6 +701,7 @@ void atomisp_buf_done(struct atomisp_sub_device *asd, int error,
 		}
 
 		asd->s3a_bufs_in_css[css_pipe_id]--;
+		atomisp_3a_loop_frame_done(asd);
 		atomisp_3a_stats_ready_event(asd, buffer.css_buffer.exp_id);
 		if (s3a_buf)
 			dev_dbg(isp->dev, "%s: s3a stat with exp_id %d is ready\n",
@@ -1715,6 +1716,18 @@ int atomisp_3a_stat(struct atomisp_sub_device *asd, int flag,
 		dev_err(isp->dev, "copy to user failed: copied %lu bytes\n",
 			ret);
 		return -EFAULT;
+	}
+
+	/* Older clients request only the packed 3A grid. */
+	if (config->rgby_data && asd->params.s3a_user_stat->rgby_data) {
+		ret = copy_to_user(config->rgby_data,
+				   asd->params.s3a_user_stat->rgby_data,
+				   256 * sizeof(*config->rgby_data));
+		if (ret) {
+			dev_err(isp->dev, "histogram copy to user failed: %lu\n",
+				ret);
+			return -EFAULT;
+		}
 	}
 
 	/* Move to free buffer list */

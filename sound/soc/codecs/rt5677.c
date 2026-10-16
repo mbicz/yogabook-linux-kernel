@@ -7,6 +7,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/dmi.h>
 #include <linux/firmware.h>
 #include <linux/fs.h>
 #include <linux/i2c.h>
@@ -69,6 +70,7 @@ static const struct reg_sequence init_list[] = {
 	{RT5677_PR_BASE + 0x15,	0x0490},
 	{RT5677_PR_BASE + 0x38,	0x0f71},
 	{RT5677_PR_BASE + 0x39,	0x0f71},
+	{RT5677_DMIC_CTRL1,	0x2505},
 };
 #define RT5677_INIT_REG_LEN ARRAY_SIZE(init_list)
 
@@ -769,7 +771,7 @@ static unsigned int rt5677_set_vad_source(struct rt5677_priv *rt5677)
 	 */
 	regmap_update_bits(rt5677->regmap, RT5677_PWR_ANLG1,
 		RT5677_LDO1_SEL_MASK | RT5677_LDO2_SEL_MASK,
-		5 << RT5677_LDO1_SEL_SFT | 5 << RT5677_LDO2_SEL_SFT);
+		6 << RT5677_LDO1_SEL_SFT | 5 << RT5677_LDO2_SEL_SFT);
 
 	/* Codec core power =  power on
 	 * LDO1 power = power on
@@ -4655,7 +4657,7 @@ static int rt5677_set_bias_level(struct snd_soc_component *component,
 
 			regmap_update_bits(rt5677->regmap, RT5677_PWR_ANLG1,
 				RT5677_LDO1_SEL_MASK | RT5677_LDO2_SEL_MASK,
-				5 << RT5677_LDO1_SEL_SFT |
+				6 << RT5677_LDO1_SEL_SFT |
 				5 << RT5677_LDO2_SEL_SFT);
 			regmap_update_bits(rt5677->regmap,
 				RT5677_PR_BASE + RT5677_BIAS_CUR4,
@@ -5208,6 +5210,12 @@ static const struct acpi_device_id rt5677_acpi_match[] = {
 };
 MODULE_DEVICE_TABLE(acpi, rt5677_acpi_match);
 
+static const struct i2c_device_id rt5677_i2c_id[] = {
+	{ "rt5677", RT5677 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, rt5677_i2c_id);
+
 static void rt5677_read_device_properties(struct rt5677_priv *rt5677,
 		struct device *dev)
 {
@@ -5529,12 +5537,48 @@ static int rt5677_init_irq(struct i2c_client *i2c)
 	return ret;
 }
 
+static const struct acpi_gpio_params lenovo_yb_reset_gpios = {0, 0, true};
+static const struct acpi_gpio_params lenovo_yb_ldo2_gpios = {1, 0, false};
+
+static const struct acpi_gpio_mapping lenovo_yb_gpios[] = {
+	{ "realtek,reset-gpios", &lenovo_yb_reset_gpios, 1 },
+	{ "realtek,pow-ldo2-gpios", &lenovo_yb_ldo2_gpios, 1 },
+	{},
+};
+
+static const struct property_entry lenovo_yb_properties[] = {
+	PROPERTY_ENTRY_BOOL("realtek,lout1-differential"),
+	PROPERTY_ENTRY_BOOL("realtek,lout2-differential"),
+	PROPERTY_ENTRY_BOOL("realtek,lout3-differential"),
+	PROPERTY_ENTRY_BOOL("realtek,in1-differential"),
+	PROPERTY_ENTRY_BOOL("realtek,in2-differential"),
+	{ }
+};
+
+static const struct dmi_system_id lenovo_yb1[] = {
+	{
+		/* YB1-X91L/F: reset and LDO GPIOs are described by ACPI. */
+		.matches = {
+			DMI_MATCH(DMI_PRODUCT_NAME, "Lenovo YB1-X91"),
+		},
+		.driver_data = (void *)lenovo_yb_gpios,
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "YETI-11"),
+		},
+	},
+	{ }
+};
+
 static int rt5677_i2c_probe(struct i2c_client *i2c)
 {
-	struct device *dev = &i2c->dev;
 	struct rt5677_priv *rt5677;
-	int ret;
+	const struct dmi_system_id *dmi_id;
 	unsigned int val;
+	int ret;
 
 	rt5677 = devm_kzalloc(&i2c->dev, sizeof(struct rt5677_priv),
 				GFP_KERNEL);
@@ -5546,9 +5590,22 @@ static int rt5677_i2c_probe(struct i2c_client *i2c)
 	INIT_DELAYED_WORK(&rt5677->dsp_work, rt5677_dsp_work);
 	i2c_set_clientdata(i2c, rt5677);
 
-	rt5677->type = (enum rt5677_type)(uintptr_t)device_get_match_data(dev);
+	rt5677->type = (enum rt5677_type)(uintptr_t)i2c_get_match_data(i2c);
 	if (rt5677->type == 0)
 		return -EINVAL;
+
+	dmi_id = dmi_first_match(lenovo_yb1);
+	if (dmi_id) {
+		if (dmi_id->driver_data &&
+		    devm_acpi_dev_add_driver_gpios(rt5677->dev, dmi_id->driver_data))
+			dev_warn(rt5677->dev, "Unable to add GPIO mapping table\n");
+
+		ret = device_create_managed_software_node(rt5677->dev,
+							lenovo_yb_properties, NULL);
+		if (ret)
+			return dev_err_probe(rt5677->dev, ret,
+					     "Unable to add device properties\n");
+	}
 
 	rt5677_read_device_properties(rt5677, &i2c->dev);
 
@@ -5558,17 +5615,28 @@ static int rt5677_i2c_probe(struct i2c_client *i2c)
 	 */
 	rt5677->pow_ldo2 = devm_gpiod_get_optional(&i2c->dev,
 			"realtek,pow-ldo2", GPIOD_OUT_HIGH);
+
 	if (IS_ERR(rt5677->pow_ldo2)) {
 		ret = PTR_ERR(rt5677->pow_ldo2);
 		dev_err(&i2c->dev, "Failed to request POW_LDO2: %d\n", ret);
 		return ret;
 	}
+
 	rt5677->reset_pin = devm_gpiod_get_optional(&i2c->dev,
-			"realtek,reset", GPIOD_OUT_LOW);
+			"realtek,reset", GPIOD_OUT_HIGH);
+
 	if (IS_ERR(rt5677->reset_pin)) {
 		ret = PTR_ERR(rt5677->reset_pin);
 		dev_err(&i2c->dev, "Failed to request RESET: %d\n", ret);
 		return ret;
+	}
+
+	if (rt5677->reset_pin) {
+		/*
+		 * To ensure clear device state, reset it.
+		 */
+		msleep(1);
+		gpiod_set_value_cansleep(rt5677->reset_pin, 0);
 	}
 
 	if (rt5677->pow_ldo2 || rt5677->reset_pin) {
@@ -5596,7 +5664,13 @@ static int rt5677_i2c_probe(struct i2c_client *i2c)
 		return ret;
 	}
 
-	regmap_read(rt5677->regmap, RT5677_VENDOR_ID2, &val);
+	ret = regmap_read(rt5677->regmap, RT5677_VENDOR_ID2, &val);
+	if (ret) {
+		dev_err(&i2c->dev,
+			"Failed to read ID register: %d\n", ret);
+		return -ENODEV;
+	}
+
 	if (val != RT5677_DEVICE_ID) {
 		dev_err(&i2c->dev,
 			"Device with ID register %#x is not rt5677\n", val);
@@ -5665,6 +5739,7 @@ static struct i2c_driver rt5677_i2c_driver = {
 		.of_match_table = rt5677_of_match,
 		.acpi_match_table = rt5677_acpi_match,
 	},
+	.id_table = rt5677_i2c_id,
 	.probe    = rt5677_i2c_probe,
 	.remove   = rt5677_i2c_remove,
 };
