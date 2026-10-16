@@ -136,4 +136,5 @@ static void __exit intel_pram_exit(void)
 }
 module_exit(intel_pram_exit);
 
+MODULE_DESCRIPTION("Intel ACPI PRAM persistent RAM platform device");
 MODULE_LICENSE("GPL");
