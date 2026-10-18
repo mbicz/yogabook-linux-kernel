@@ -5,6 +5,7 @@
  */
 
 #include <linux/math.h>
+#include <linux/moduleparam.h>
 
 #include "gdc_device.h"		/* gdc_lut_store(), ... */
 #include "isp.h"			/* ISP_VEC_ELEMBITS */
@@ -2376,6 +2377,31 @@ sh_css_create_isp_params(struct ia_css_stream *stream,
 	return 0;
 }
 
+/*
+ * Noise reduction strength for new streams: 0 = off, 1 = the stock defaults
+ * (Bayer NR 0.25 / YNR 0.125), 2 = stronger luma noise reduction for the high
+ * analogue gain needed indoors. Chroma coring stays off: on this sensor it
+ * strips subtle colour along with the noise.
+ */
+static unsigned int nr = 2;
+module_param(nr, uint, 0644);
+MODULE_PARM_DESC(nr, "ISP noise reduction for new streams: 0 off, 1 stock, 2 moderate (default)");
+
+static const struct ia_css_nr_config nr_off_config = { 0, 0, 0, 0, 0 };
+static const struct ia_css_nr_config nr_moderate_config = {
+	32768,	/* bnr_gain 0.5 */
+	24576,	/* ynr_gain 0.375 */
+	1280,	/* direction */
+	0,	/* threshold_cb: no chroma coring */
+	0,	/* threshold_cr */
+};
+
+static const struct ia_css_nr_config *sh_css_nr_config(void)
+{
+	return nr == 0 ? &nr_off_config :
+	       nr >= 2 ? &nr_moderate_config : &default_nr_config;
+}
+
 static bool
 sh_css_init_isp_params_from_global(struct ia_css_stream *stream,
 				   struct ia_css_isp_parameters *params,
@@ -2400,7 +2426,7 @@ sh_css_init_isp_params_from_global(struct ia_css_stream *stream,
 	if (use_default_config) {
 		ia_css_set_xnr3_config(params, &default_xnr3_config);
 
-		sh_css_set_nr_config(params, &default_nr_config);
+		sh_css_set_nr_config(params, sh_css_nr_config());
 		sh_css_set_ee_config(params, &default_ee_config);
 		if (isp_pipe_version == SH_CSS_ISP_PIPE_VERSION_1)
 			sh_css_set_macc_table(params, &default_macc_table);
