@@ -14,6 +14,7 @@ atomisp = $(srctree)/drivers/staging/media/atomisp/
 # SPDX-License-Identifier: GPL-2.0
 atomisp-objs += \
 	pci/atomisp_cmd.o \
+	pci/atomisp_3a_loop.o \
 	pci/atomisp_compat_css20.o \
 	pci/atomisp_csi2.o \
 	pci/atomisp_csi2_bridge.o \
