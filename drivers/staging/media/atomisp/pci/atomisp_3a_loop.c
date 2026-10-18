@@ -55,13 +55,36 @@
 #define AE_DEADBAND		13	/* ~5% luma error: skip adjustment */
 #define AE_PACE_FRAMES		8	/* adjust at most every N frames */
 
+/*
+ * The s3a AWB statistics are taken before the black-level (OB) stage, so each
+ * channel still carries the sensor pedestal: 64/1024, i.e. 512 in the ISP's
+ * 13-bit Bayer domain (matching default_ob_config). Gray-world on the raw sums
+ * pulls R/G and B/G towards 1 and leaves a green cast that the CCM amplifies.
+ * Each grid cell sums bqs_per_grid_cell^2 Bayer quads, so subtract the
+ * pedestal scaled to one cell before computing the gains.
+ */
+static unsigned int awb_black = 512;
+module_param(awb_black, uint, 0644);
+MODULE_PARM_DESC(awb_black, "AWB black level per pixel, 13-bit ISP domain (0 = off)");
+
+static u64 atomisp_3a_awb_net(u64 sum, u64 black)
+{
+	return sum > black ? sum - black : 0;
+}
+
 static void atomisp_3a_awb(struct atomisp_sub_device *asd, u64 gr, u64 r,
-			   u64 b, u64 gb)
+			   u64 b, u64 gb, unsigned int count,
+			   unsigned int bqs_per_cell)
 {
 	struct atomisp_wb_config wb;
 	u32 new_r, new_b;
 	u64 green;
+	u64 black = (u64)awb_black * bqs_per_cell * bqs_per_cell * count;
 
+	r = atomisp_3a_awb_net(r, black);
+	gr = atomisp_3a_awb_net(gr, black);
+	b = atomisp_3a_awb_net(b, black);
+	gb = atomisp_3a_awb_net(gb, black);
 	if (!r || !b || !gr || !gb)
 		return;
 	green = (gr + gb) / 2;
@@ -219,7 +242,8 @@ void atomisp_3a_loop_frame_done(struct atomisp_sub_device *asd)
 		gb += cells[i].awb_gb;
 	}
 
-	atomisp_3a_awb(asd, gr, r, b, gb);
+	atomisp_3a_awb(asd, gr, r, b, gb, count,
+		       stat->grid.bqs_per_grid_cell);
 	atomisp_3a_ae(asd, stat);
 	/* Recycle the consumed buffer to the free list for the firmware. */
 	list_del_init(&s3a_buf->list);
