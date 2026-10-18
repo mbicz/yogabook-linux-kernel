@@ -58,6 +58,12 @@
 #define AE_MAX_FACTOR		277	/* at most 1.08x brighter per step */
 #define AE_DEADBAND		13	/* ~5% luma error: skip adjustment */
 #define AE_PACE_FRAMES		2	/* adjust at most every N frames */
+/*
+ * Analogue gain is spent only once exposure time is exhausted. The OV
+ * sensors here use 128 = 1.0x, but OV8858 reports a control minimum of 0,
+ * so never use the minimum itself as the 1.0x unit (divide by zero).
+ */
+#define AE_GAIN_UNIT		128
 
 /*
  * Raw chromaticity (R/G, B/G; AWB_CHROMA_UNIT = 1.0) of a white surface seen
@@ -316,8 +322,8 @@ static void atomisp_3a_ae(struct atomisp_sub_device *asd,
 	 * exposure: less noise, and the step is exactly 'factor'.
 	 */
 	total = div_s64((s64)exp * gain * factor, 256);
-	new_exp = clamp_t(s64, div_s64(total, gain_c->minimum),
-			  exp_c->minimum, exp_c->maximum);
+	new_exp = clamp_t(s64, div_s64(total, max(gain_c->minimum, AE_GAIN_UNIT)),
+			  max(exp_c->minimum, 1), exp_c->maximum);
 	new_gain = clamp_t(s64, div_s64(total, new_exp),
 			   gain_c->minimum, gain_c->maximum);
 	if (new_exp == exp && new_gain == gain)
