@@ -1596,8 +1596,10 @@ static int ov8858_start_stream(struct ov8858 *ov8858,
 	/* 200 usec max to let PLL stabilize. */
 	fsleep(200);
 
-	/* Program the sensor with the lens shading calibration stored
-	 * in the module OTP. */
+	/*
+	 * Program the sensor with the lens shading calibration stored in
+	 * the module OTP.
+	 */
 	ret = ov8858_apply_otp_lenc(ov8858);
 	if (ret)
 		return ret;
@@ -1868,6 +1870,7 @@ static int ov8858_power_on(struct ov8858 *ov8858)
 	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
 	struct device *dev = &client->dev;
 	unsigned long delay_us;
+	unsigned int xvclk = ov8858->xvclk_rate;
 	int ret;
 
 	ret = clk_prepare_enable(ov8858->xvclk);
@@ -1888,8 +1891,7 @@ static int ov8858_power_on(struct ov8858 *ov8858)
 	 * the original sensor power sequence. The shorter SCCB-cycle delay
 	 * here causes NACKs on the first write after runtime resume.
 	 */
-	delay_us = DIV_ROUND_UP_ULL(8192ULL * USEC_PER_SEC,
-				   ov8858->xvclk_rate);
+	delay_us = DIV_ROUND_UP_ULL(8192ULL * USEC_PER_SEC, xvclk);
 
 	gpiod_set_value_cansleep(ov8858->reset_gpio, 0);
 	fsleep(1000);
