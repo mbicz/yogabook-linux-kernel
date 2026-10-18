@@ -96,6 +96,45 @@ static const struct {
 	{ 1813, 2918 },	/* 6302K */
 };
 
+/*
+ * Per-sensor colour tuning. The locus above is the OV2740's; other sensors
+ * scale it per channel (4096 = 1.0) to their own white response. The CCM is
+ * pushed to the ISP (CCM2, YCgCo -> RGB) at the start of every stream so that
+ * switching cameras switches tuning.
+ */
+struct atomisp_3a_tuning {
+	const char *sensor;		/* sensor subdev name prefix */
+	s32 locus_r, locus_b;		/* locus scale, 4096 = 1.0 */
+	struct ia_css_cc_config ccm;
+};
+
+static const struct atomisp_3a_tuning atomisp_3a_tunings[] = {
+	{
+		/* 4136K CCM from the AIQB-derived libcamera ov2740.yaml */
+		.sensor = "ov2740", .locus_r = 4096, .locus_b = 4096,
+		.ccm = { 11, { 2048, -5467, 4042, 2048, 4665, -19,
+			       2048, -5977, -3906 } },
+	}, {
+		/* No published OV8858 CCM: plain YCgCo -> RGB, no hue errors. */
+		.sensor = "ov8858", .locus_r = 4096, .locus_b = 4096,
+		.ccm = { 12, { 4096, -4096, 4096, 4096, 4096, 0,
+			       4096, -4096, -4096 } },
+	},
+};
+
+static const struct atomisp_3a_tuning *
+atomisp_3a_tuning(struct atomisp_sub_device *asd)
+{
+	struct v4l2_subdev *sd = asd->isp->inputs[asd->input_curr].sensor;
+	unsigned int i;
+
+	for (i = 0; sd && i < ARRAY_SIZE(atomisp_3a_tunings); i++)
+		if (!strncmp(sd->name, atomisp_3a_tunings[i].sensor,
+			     strlen(atomisp_3a_tunings[i].sensor)))
+			return &atomisp_3a_tunings[i];
+	return &atomisp_3a_tunings[0];
+}
+
 /* Per-pixel limits in the 13-bit ISP Bayer domain. */
 #define AWB_SAT_LEVEL		6800	/* ~83% of 8191: clipped, no colour info */
 #define AWB_DARK_LEVEL		48	/* green below this is noise */
@@ -105,21 +144,24 @@ static const struct {
 #define AWB_SPEED_SHIFT		3	/* move 1/8 of the way per frame */
 
 /* Move (cr, cb) to the closest point of the curve; return squared distance. */
-static s64 atomisp_3a_awb_project(s32 *cr, s32 *cb)
+static s64 atomisp_3a_awb_project(const struct atomisp_3a_tuning *t,
+				  s32 *cr, s32 *cb)
 {
 	s64 best = S64_MAX, pr = *cr, pb = *cb, rr = *cr, rb = *cb;
 	unsigned int i;
 
 	for (i = 0; i + 1 < ARRAY_SIZE(awb_locus); i++) {
-		s64 ar = awb_locus[i].r, ab = awb_locus[i].b;
-		s64 dr = awb_locus[i + 1].r - ar, db = awb_locus[i + 1].b - ab;
+		s64 ar = (s64)awb_locus[i].r * t->locus_r / 4096;
+		s64 ab = (s64)awb_locus[i].b * t->locus_b / 4096;
+		s64 dr = (s64)awb_locus[i + 1].r * t->locus_r / 4096 - ar;
+		s64 db = (s64)awb_locus[i + 1].b * t->locus_b / 4096 - ab;
 		s64 len = dr * dr + db * db;
-		s64 t = (pr - ar) * dr + (pb - ab) * db;
+		s64 k = (pr - ar) * dr + (pb - ab) * db;
 		s64 qr, qb, d;
 
-		t = clamp_t(s64, t, 0, len);
-		qr = ar + div64_s64(dr * t, len);
-		qb = ab + div64_s64(db * t, len);
+		k = clamp_t(s64, k, 0, len);
+		qr = ar + div64_s64(dr * k, len);
+		qb = ab + div64_s64(db * k, len);
 		d = (pr - qr) * (pr - qr) + (pb - qb) * (pb - qb);
 		if (d < best) {
 			best = d;
@@ -147,7 +189,10 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	u64 sat = AWB_SAT_LEVEL * px, dark = AWB_DARK_LEVEL * px;
 	u64 ar = 0, ag = 0, ab = 0, gr = 0, gg = 0, gb = 0;
 	unsigned int i, usable = 0, grey = 0;
+	const struct atomisp_3a_tuning *tun = atomisp_3a_tuning(asd);
 	struct atomisp_wb_config wb;
+	s32 all_r, all_b;
+	bool first = !asd->awb_r || !asd->awb_b;
 	s32 cr, cb, qr, qb;
 	s64 d2;
 	u32 new_r, new_b;
@@ -172,7 +217,7 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 
 		pr = atomisp_3a_awb_ratio(c->awb_r, g);
 		pb = atomisp_3a_awb_ratio(c->awb_b, g);
-		if (atomisp_3a_awb_project(&pr, &pb) >
+		if (atomisp_3a_awb_project(tun, &pr, &pb) >
 		    (s64)AWB_GREY_TOL * AWB_GREY_TOL)
 			continue;	/* too coloured to be a white surface */
 		gr += c->awb_r;
@@ -182,6 +227,8 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	}
 	if (!usable)
 		return;	/* everything clipped or dark: keep the current gains */
+	all_r = atomisp_3a_awb_ratio(ar, ag);
+	all_b = atomisp_3a_awb_ratio(ab, ag);
 	if (grey * 100 < usable * AWB_MIN_GREY_PCT) {
 		gr = ar;
 		gg = ag;
@@ -192,7 +239,7 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	cb = atomisp_3a_awb_ratio(gb, gg);
 	qr = cr;
 	qb = cb;
-	d2 = atomisp_3a_awb_project(&qr, &qb);
+	d2 = atomisp_3a_awb_project(tun, &qr, &qb);
 	if (d2 > (s64)AWB_TRANSVERSE * AWB_TRANSVERSE) {
 		s64 d = int_sqrt64(d2);
 
@@ -227,6 +274,15 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	wb.r = new_r;
 	wb.b = new_b;
 
+	if (first) {
+		asd->params.css_param.yuv2rgb_cc_config = tun->ccm;
+		asd->params.config.yuv2rgb_cc_config =
+			&asd->params.css_param.yuv2rgb_cc_config;
+		asd->params.css_param.update_flag.yuv2rgb_cc_config =
+			(struct atomisp_cc_config *)
+			&asd->params.css_param.yuv2rgb_cc_config;
+	}
+
 	memcpy(&asd->params.css_param.wb_config, &wb, sizeof(wb));
 	asd->params.config.wb_config = &asd->params.css_param.wb_config;
 	asd->params.css_param.update_flag.wb_config =
@@ -237,8 +293,9 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	asd->awb_b = new_b;
 
 	dev_dbg(asd->isp->dev,
-		"3A: AWB applied r=%u b=%u (white %d/%d, %u grey of %u usable of %u cells)\n",
-		new_r, new_b, cr, cb, grey, usable, count);
+		"3A: AWB %s applied r=%u b=%u (white %d/%d, all %d/%d, %u grey of %u usable of %u cells)\n",
+		tun->sensor, new_r, new_b, cr, cb, all_r, all_b, grey, usable,
+		count);
 }
 
 static void atomisp_3a_ae(struct atomisp_sub_device *asd,
