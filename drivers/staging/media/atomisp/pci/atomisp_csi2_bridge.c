@@ -375,6 +375,7 @@ static const struct acpi_device_id atomisp_sensor_configs[] = {
 static int atomisp_csi2_add_pmc_clk_lookup(struct acpi_device *adev, int clock_num)
 {
 	struct clk *clk;
+	struct clk_hw *hw;
 	char name[14];
 	char sensor_name[sizeof("i2c-") + MAX_ACPI_DEVICE_NAME_LEN];
 	int ret;
@@ -400,8 +401,8 @@ static int atomisp_csi2_add_pmc_clk_lookup(struct acpi_device *adev, int clock_n
 	 * graph and GPIO mappings also survive ISP unbind/rebind. Use the
 	 * clock core's cleanup so it remains valid if this module is unloaded.
 	 */
-	ret = devm_clk_hw_register_clkdev(&adev->dev, __clk_get_hw(clk),
-					 NULL, sensor_name);
+	hw = __clk_get_hw(clk);
+	ret = devm_clk_hw_register_clkdev(&adev->dev, hw, NULL, sensor_name);
 	clk_put(clk);
 	if (ret)
 		return ret;
