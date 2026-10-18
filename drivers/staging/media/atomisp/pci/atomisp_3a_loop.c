@@ -21,9 +21,7 @@
  * ATOMISP_IOC_G_3A_STAT ioctl does and recycles it to the free list, so
  * no buffers are starved from the firmware.
  *
- * Note: ATOMISP_IOC_G_3A_STAT itself runs without isp->mutex (pre-existing
- * staging driver behaviour); concurrent use of that ioctl while this loop
- * is active has the same benign race as two concurrent ioctl callers.
+ * Both the statistics ioctl and frame completion are serialized by isp->mutex.
  */
 
 #include <linux/kernel.h>
@@ -31,8 +29,8 @@
 
 #include <media/v4l2-ctrls.h>
 
-#include <linux/list.h>
 #include <linux/math.h>
+#include <linux/math64.h>
 #include <linux/string.h>
 
 #include "atomisp_cmd.h"
@@ -50,46 +48,166 @@
 
 /* AE: 8-bit luma target with a clamped proportional controller. */
 #define AE_TARGET_LUMA		110
-#define AE_MIN_FACTOR		179	/* at most 0.7x darker per step */
-#define AE_MAX_FACTOR		366	/* at most 1.43x brighter per step */
+/*
+ * Small, frequent steps keep the preview free of visible brightness jumps:
+ * close half of the error per step, at most 8%, every second frame (the
+ * sensor applies new exposure a frame later). A full 2x change still settles
+ * in about a third of a second at 30 fps.
+ */
+#define AE_MIN_FACTOR		236	/* at most 0.92x darker per step */
+#define AE_MAX_FACTOR		277	/* at most 1.08x brighter per step */
 #define AE_DEADBAND		13	/* ~5% luma error: skip adjustment */
-#define AE_PACE_FRAMES		8	/* adjust at most every N frames */
+#define AE_PACE_FRAMES		2	/* adjust at most every N frames */
 
 /*
- * The s3a AWB statistics are taken before the black-level (OB) stage, so each
- * channel still carries the sensor pedestal: 64/1024, i.e. 512 in the ISP's
- * 13-bit Bayer domain (matching default_ob_config). Gray-world on the raw sums
- * pulls R/G and B/G towards 1 and leaves a green cast that the CCM amplifies.
- * Each grid cell sums bqs_per_grid_cell^2 Bayer quads, so subtract the
- * pedestal scaled to one cell before computing the gains.
+ * Raw chromaticity (R/G, B/G; AWB_CHROMA_UNIT = 1.0) of a white surface seen
+ * by the OV2740 under Planckian light, 2319K..6302K: the inverses of the
+ * neutral gains in the AIQB-derived tuning of libcamera's simple IPA
+ * ov2740.yaml (colourGains). The s3a statistics are taken after the OB stage
+ * (default_ob_config), so they are already black-level corrected.
+ *
+ * Gray-world on the whole frame fails whenever the scene is not grey on
+ * average: clipped windows and lamps read R = G = B and pull the gains towards
+ * 1.0x (a strong green cast on this sensor), coloured objects pull towards
+ * their complement. Instead:
+ *  - drop clipped and near-black cells,
+ *  - let only cells whose own chromaticity is near the white curve vote,
+ *  - keep the result within AWB_TRANSVERSE of the curve (module-to-module and
+ *    illuminant variation is real, a green or magenta "white" is not),
+ *  - and converge smoothly.
  */
-static unsigned int awb_black = 512;
-module_param(awb_black, uint, 0644);
-MODULE_PARM_DESC(awb_black, "AWB black level per pixel, 13-bit ISP domain (0 = off)");
+#define AWB_CHROMA_UNIT		4096
+static const struct {
+	s32 r, b;
+} awb_locus[] = {
+	{ 4054, 1465 },	/* 2319K */
+	{ 3247, 1720 },	/* 2854K */
+	{ 2927, 1690 },	/* 2884K */
+	{ 2618, 1834 },	/* 3239K */
+	{ 2293, 2172 },	/* 3865K */
+	{ 2155, 2161 },	/* 4136K */
+	{ 2089, 2492 },	/* 4939K */
+	{ 1813, 2918 },	/* 6302K */
+};
 
-static u64 atomisp_3a_awb_net(u64 sum, u64 black)
+/* Per-pixel limits in the 13-bit ISP Bayer domain. */
+#define AWB_SAT_LEVEL		6800	/* ~83% of 8191: clipped, no colour info */
+#define AWB_DARK_LEVEL		48	/* green below this is noise */
+#define AWB_GREY_TOL		410	/* grey-candidate cell: within 0.10 of curve */
+#define AWB_TRANSVERSE		205	/* result: at most 0.05 off the curve */
+#define AWB_MIN_GREY_PCT	5	/* fewer grey voters: use all usable cells */
+#define AWB_SPEED_SHIFT		3	/* move 1/8 of the way per frame */
+
+/* Move (cr, cb) to the closest point of the curve; return squared distance. */
+static s64 atomisp_3a_awb_project(s32 *cr, s32 *cb)
 {
-	return sum > black ? sum - black : 0;
+	s64 best = S64_MAX, pr = *cr, pb = *cb, rr = *cr, rb = *cb;
+	unsigned int i;
+
+	for (i = 0; i + 1 < ARRAY_SIZE(awb_locus); i++) {
+		s64 ar = awb_locus[i].r, ab = awb_locus[i].b;
+		s64 dr = awb_locus[i + 1].r - ar, db = awb_locus[i + 1].b - ab;
+		s64 len = dr * dr + db * db;
+		s64 t = (pr - ar) * dr + (pb - ab) * db;
+		s64 qr, qb, d;
+
+		t = clamp_t(s64, t, 0, len);
+		qr = ar + div64_s64(dr * t, len);
+		qb = ab + div64_s64(db * t, len);
+		d = (pr - qr) * (pr - qr) + (pb - qb) * (pb - qb);
+		if (d < best) {
+			best = d;
+			rr = qr;
+			rb = qb;
+		}
+	}
+	*cr = rr;
+	*cb = rb;
+	return best;
 }
 
-static void atomisp_3a_awb(struct atomisp_sub_device *asd, u64 gr, u64 r,
-			   u64 b, u64 gb, unsigned int count,
-			   unsigned int bqs_per_cell)
+static s32 atomisp_3a_awb_ratio(u64 num, u64 den)
 {
-	struct atomisp_wb_config wb;
-	u32 new_r, new_b;
-	u64 green;
-	u64 black = (u64)awb_black * bqs_per_cell * bqs_per_cell * count;
+	return min_t(u64, div64_u64(num * AWB_CHROMA_UNIT, den),
+		     4 * AWB_CHROMA_UNIT);
+}
 
-	r = atomisp_3a_awb_net(r, black);
-	gr = atomisp_3a_awb_net(gr, black);
-	b = atomisp_3a_awb_net(b, black);
-	gb = atomisp_3a_awb_net(gb, black);
-	if (!r || !b || !gr || !gb)
+static void atomisp_3a_awb(struct atomisp_sub_device *asd,
+			   struct ia_css_3a_statistics *stat,
+			   struct ia_css_3a_output *cells, unsigned int count)
+{
+	unsigned int bqs = stat->grid.bqs_per_grid_cell;
+	u64 px = (u64)bqs * bqs;
+	u64 sat = AWB_SAT_LEVEL * px, dark = AWB_DARK_LEVEL * px;
+	u64 ar = 0, ag = 0, ab = 0, gr = 0, gg = 0, gb = 0;
+	unsigned int i, usable = 0, grey = 0;
+	struct atomisp_wb_config wb;
+	s32 cr, cb, qr, qb;
+	s64 d2;
+	u32 new_r, new_b;
+
+	if (!asd->awb_en || !px)
 		return;
-	green = (gr + gb) / 2;
-	new_r = clamp_t(u64, green * AWB_UNIT / r, AWB_MIN_GAIN, AWB_MAX_GAIN);
-	new_b = clamp_t(u64, green * AWB_UNIT / b, AWB_MIN_GAIN, AWB_MAX_GAIN);
+
+	for (i = 0; i < count; i++) {
+		const struct ia_css_3a_output *c = &cells[i];
+		u64 g = ((u64)c->awb_gr + c->awb_gb) / 2;
+		s32 pr, pb;
+
+		if (c->awb_r > sat || c->awb_gr > sat ||
+		    c->awb_b > sat || c->awb_gb > sat)
+			continue;	/* clipped: R = G = B whatever the light */
+		if (g < dark)
+			continue;	/* noise */
+		ar += c->awb_r;
+		ag += g;
+		ab += c->awb_b;
+		usable++;
+
+		pr = atomisp_3a_awb_ratio(c->awb_r, g);
+		pb = atomisp_3a_awb_ratio(c->awb_b, g);
+		if (atomisp_3a_awb_project(&pr, &pb) >
+		    (s64)AWB_GREY_TOL * AWB_GREY_TOL)
+			continue;	/* too coloured to be a white surface */
+		gr += c->awb_r;
+		gg += g;
+		gb += c->awb_b;
+		grey++;
+	}
+	if (!usable)
+		return;	/* everything clipped or dark: keep the current gains */
+	if (grey * 100 < usable * AWB_MIN_GREY_PCT) {
+		gr = ar;
+		gg = ag;
+		gb = ab;
+	}
+
+	cr = atomisp_3a_awb_ratio(gr, gg);
+	cb = atomisp_3a_awb_ratio(gb, gg);
+	qr = cr;
+	qb = cb;
+	d2 = atomisp_3a_awb_project(&qr, &qb);
+	if (d2 > (s64)AWB_TRANSVERSE * AWB_TRANSVERSE) {
+		s64 d = int_sqrt64(d2);
+
+		cr = qr + div64_s64((s64)(cr - qr) * AWB_TRANSVERSE, d);
+		cb = qb + div64_s64((s64)(cb - qb) * AWB_TRANSVERSE, d);
+	}
+	if (cr <= 0 || cb <= 0)
+		return;
+
+	new_r = clamp_t(u32, AWB_UNIT * AWB_CHROMA_UNIT / cr,
+			AWB_MIN_GAIN, AWB_MAX_GAIN);
+	new_b = clamp_t(u32, AWB_UNIT * AWB_CHROMA_UNIT / cb,
+			AWB_MIN_GAIN, AWB_MAX_GAIN);
+
+	/* Converge smoothly instead of jumping with every frame's content. */
+	if (asd->awb_r && asd->awb_b) {
+		new_r = (s32)asd->awb_r +
+			(((s32)new_r - (s32)asd->awb_r) >> AWB_SPEED_SHIFT);
+		new_b = (s32)asd->awb_b +
+			(((s32)new_b - (s32)asd->awb_b) >> AWB_SPEED_SHIFT);
+	}
 
 	/* Hysteresis: only push an ISP parameter update on meaningful drift. */
 	if (abs((int)new_r - (int)asd->awb_r) +
@@ -112,7 +230,9 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd, u64 gr, u64 r,
 	asd->awb_r = new_r;
 	asd->awb_b = new_b;
 
-	dev_dbg(asd->isp->dev, "3A: AWB applied r=%u b=%u\n", new_r, new_b);
+	dev_dbg(asd->isp->dev,
+		"3A: AWB applied r=%u b=%u (white %d/%d, %u grey of %u usable of %u cells)\n",
+		new_r, new_b, cr, cb, grey, usable, count);
 }
 
 static void atomisp_3a_ae(struct atomisp_sub_device *asd,
@@ -125,6 +245,7 @@ static void atomisp_3a_ae(struct atomisp_sub_device *asd,
 	u64 luma_sum = 0, count = 0;
 	unsigned int mean, factor, i;
 	s32 exp, gain, new_exp, new_gain;
+	s64 total;
 
 	if (!asd->ae_en)
 		return;
@@ -170,10 +291,11 @@ static void atomisp_3a_ae(struct atomisp_sub_device *asd,
 	 * output luma to the target on both sensors.
 	 */
 
-	factor = clamp_t(u32, AE_TARGET_LUMA * 256 / mean,
-			 AE_MIN_FACTOR, AE_MAX_FACTOR);
+	factor = AE_TARGET_LUMA * 256 / mean;
 	if (abs((int)factor - 256) < AE_DEADBAND)
 		return;
+	factor = clamp_t(u32, 256 + ((int)factor - 256) / 2,
+			 AE_MIN_FACTOR, AE_MAX_FACTOR);
 
 	if (!asd->isp->inputs[asd->input_curr].sensor)
 		return;
@@ -188,9 +310,15 @@ static void atomisp_3a_ae(struct atomisp_sub_device *asd,
 	if (exp <= 0 || gain <= 0)
 		return;
 
-	new_exp = clamp_t(s64, (s64)exp * factor / 256,
+	/*
+	 * Scale the total exposure (time x gain) once, then spend it on
+	 * exposure time first and analogue gain only beyond the longest
+	 * exposure: less noise, and the step is exactly 'factor'.
+	 */
+	total = div_s64((s64)exp * gain * factor, 256);
+	new_exp = clamp_t(s64, div_s64(total, gain_c->minimum),
 			  exp_c->minimum, exp_c->maximum);
-	new_gain = clamp_t(s64, (s64)gain * factor / 256,
+	new_gain = clamp_t(s64, div_s64(total, new_exp),
 			   gain_c->minimum, gain_c->maximum);
 	if (new_exp == exp && new_gain == gain)
 		return;
@@ -213,8 +341,7 @@ void atomisp_3a_loop_frame_done(struct atomisp_sub_device *asd)
 	struct atomisp_s3a_buf *s3a_buf;
 	struct ia_css_3a_statistics *stat = asd->params.s3a_user_stat;
 	struct ia_css_3a_output *cells;
-	unsigned int count, i;
-	u64 r = 0, gr = 0, b = 0, gb = 0;
+	unsigned int count;
 
 	if ((!asd->awb_en && !asd->ae_en) ||
 	    asd->params.s3a_output_bytes == 0 || !stat || !stat->data)
@@ -231,19 +358,13 @@ void atomisp_3a_loop_frame_done(struct atomisp_sub_device *asd)
 	else if (ia_css_get_3a_statistics(stat, s3a_buf->s3a_data))
 		return; /* translation failed: leave the buffer queued */
 
-	count = stat->grid.width * stat->grid.height;
-	count = min_t(unsigned int, count,
-		      asd->params.s3a_output_bytes / sizeof(*cells));
-	cells = stat->data;
-	for (i = 0; i < count; i++) {
-		r += cells[i].awb_r;
-		gr += cells[i].awb_gr;
-		b += cells[i].awb_b;
-		gb += cells[i].awb_gb;
+	if (asd->awb_en) {
+		count = stat->grid.width * stat->grid.height;
+		count = min_t(unsigned int, count,
+			      asd->params.s3a_output_bytes / sizeof(*cells));
+		cells = stat->data;
+		atomisp_3a_awb(asd, stat, cells, count);
 	}
-
-	atomisp_3a_awb(asd, gr, r, b, gb, count,
-		       stat->grid.bqs_per_grid_cell);
 	atomisp_3a_ae(asd, stat);
 	/* Recycle the consumed buffer to the free list for the firmware. */
 	list_del_init(&s3a_buf->list);
