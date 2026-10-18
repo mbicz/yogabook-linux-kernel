@@ -76,6 +76,39 @@
 #define OV8858_TEST_PATTERN_ENABLE	0x80
 #define OV8858_TEST_PATTERN_DISABLE	0x0
 
+#define OV8858_REG_ISP_CTRL00		OV8858_REG_8BIT(0x5000)
+#define OV8858_ISP_CTRL00_LENC		BIT(7)
+#define OV8858_REG_ISP_CTRL02		OV8858_REG_8BIT(0x5002)
+#define OV8858_ISP_CTRL02_OTP_DPC		BIT(3)
+
+#define OV8858_REG_OTP_MODE_CTRL	OV8858_REG_8BIT(0x3d84)
+#define OV8858_OTP_PROGRAM_DISABLE	BIT(7)
+#define OV8858_OTP_MANUAL_MODE		BIT(6)
+#define OV8858_REG_OTP_START_HIGH	OV8858_REG_8BIT(0x3d88)
+#define OV8858_REG_OTP_START_LOW	OV8858_REG_8BIT(0x3d89)
+#define OV8858_REG_OTP_END_HIGH		OV8858_REG_8BIT(0x3d8a)
+#define OV8858_REG_OTP_END_LOW		OV8858_REG_8BIT(0x3d8b)
+#define OV8858_REG_OTP_LOAD_CTRL	OV8858_REG_8BIT(0x3d81)
+
+/*
+ * The module calibration data lives in the OTP memory area reserved for
+ * customers, exposed through the OTP buffer at 0x7010-0x720f.
+ */
+#define OV8858_OTP_AREA_START		0x7010
+#define OV8858_OTP_AREA_SIZE		512
+#define OV8858_OTP_CHECKSUM_SIZE	508	/* 0x7010-0x720b */
+#define OV8858_OTP_CHECKSUM_REG		0x720c	/* 0x720c-0x720e */
+
+/*
+ * The lens-shading calibration is a table of 240 bytes holding the control
+ * points for the luminance, blue and red channel of the LENC block. It is stored
+ * in the OTP as two groups, each one flagged in the OTP information byte.
+ */
+#define OV8858_LENC_TABLE_SIZE		240
+#define OV8858_LENC_TABLE_REG		0x5800
+#define OV8858_LENC_G1_BASE		0x7025
+#define OV8858_LENC_G2_BASE		0x7115
+
 #define REG_NULL			0xffff
 
 static const char * const ov8858_supply_names[] = {
@@ -122,6 +155,9 @@ struct ov8858 {
 	const struct regval	*global_regs;
 
 	unsigned int		num_lanes;
+
+	u8			lenc_table[OV8858_LENC_TABLE_SIZE];
+	bool			lenc_valid;
 };
 
 static inline struct ov8858 *sd_to_ov8858(struct v4l2_subdev *sd)
@@ -1316,6 +1352,219 @@ static int ov8858_read(struct ov8858 *ov8858, u32 reg, u32 *val)
 }
 
 /* ----------------------------------------------------------------------------
+ * OTP
+ */
+
+/*
+ * Load the customer OTP area into the sensor OTP buffer. Loading is triggered on
+ * power up or by writing 0x01 to 0x3d81, the latter requires the sensor to be
+ * streaming.
+ */
+static int ov8858_otp_load(struct ov8858 *ov8858)
+{
+	int ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_MODE_CTRL,
+			   OV8858_OTP_PROGRAM_DISABLE | OV8858_OTP_MANUAL_MODE,
+			   NULL);
+	if (ret)
+		return ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_START_HIGH,
+			   OV8858_OTP_AREA_START >> 8, NULL);
+	if (ret)
+		return ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_START_LOW,
+			   OV8858_OTP_AREA_START & 0xff, NULL);
+	if (ret)
+		return ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_END_HIGH,
+			   (OV8858_OTP_AREA_START + OV8858_OTP_AREA_SIZE - 1) >> 8,
+			   NULL);
+	if (ret)
+		return ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_END_LOW,
+			   (OV8858_OTP_AREA_START + OV8858_OTP_AREA_SIZE - 1) & 0xff,
+			   NULL);
+	if (ret)
+		return ret;
+
+	ret = ov8858_write(ov8858, OV8858_REG_OTP_LOAD_CTRL, 0x01, NULL);
+	if (ret)
+		return ret;
+
+	/* The OTP read-out takes up to 10ms. */
+	fsleep(10000);
+
+	return 0;
+}
+
+/*
+ * Program the lens-shading table. The LENC control point registers are only
+ * accessible through a burst write starting at 0x5800.
+ */
+static int ov8858_write_lenc_table(struct ov8858 *ov8858, const u8 *table)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
+	u8 buf[2 + OV8858_LENC_TABLE_SIZE];
+	struct i2c_msg msg = {
+		.addr = client->addr,
+		.flags = 0,
+		.len = sizeof(buf),
+		.buf = buf,
+	};
+	int ret;
+
+	put_unaligned_be16(OV8858_LENC_TABLE_REG, buf);
+	memcpy(buf + 2, table, OV8858_LENC_TABLE_SIZE);
+
+	ret = i2c_transfer(client->adapter, &msg, 1);
+	if (ret != 1) {
+		ret = ret < 0 ? ret : -EIO;
+		dev_err(&client->dev, "Failed to write lens shading table: %d\n",
+			ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * Read the lens-shading calibration from the module OTP and program the LENC
+ * block with it. Reading the calibration requires the OTP buffer to be loaded,
+ * which can only be triggered while the sensor is streaming.
+ */
+static int ov8858_apply_otp_lenc(struct ov8858 *ov8858)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
+	u8 table[OV8858_LENC_TABLE_SIZE];
+	u32 checksum[3], flag, ctrl00, ctrl02, val;
+	unsigned int base, sum = 0, stored, i;
+	int ret;
+
+	if (ov8858->lenc_valid)
+		return ov8858_write_lenc_table(ov8858, ov8858->lenc_table);
+
+	ret = ov8858_write(ov8858, OV8858_REG_SC_CTRL0100,
+			   OV8858_MODE_STREAMING, NULL);
+	if (ret)
+		return ret;
+
+	fsleep(20000);
+
+	/* Reading the OTP buffer disturbs the OTP based defective pixel
+	 * correction, disable it while the buffer is read.
+	 */
+	ret = ov8858_read(ov8858, OV8858_REG_ISP_CTRL02, &ctrl02);
+	if (!ret)
+		ret = ov8858_write(ov8858, OV8858_REG_ISP_CTRL02,
+				   ctrl02 & ~OV8858_ISP_CTRL02_OTP_DPC, NULL);
+	if (ret)
+		goto restore_ctrl02;
+
+	ret = ov8858_otp_load(ov8858);
+	if (ret)
+		goto restore_ctrl02;
+
+	ret = ov8858_read(ov8858, OV8858_REG_8BIT(OV8858_OTP_AREA_START),
+			  &flag);
+	if (ret)
+		goto restore_ctrl02;
+
+	if ((flag & 0x0c) == 0x04) {
+		base = OV8858_LENC_G1_BASE;
+	} else if ((flag & 0x03) == 0x01) {
+		base = OV8858_LENC_G2_BASE;
+	} else {
+		dev_dbg(&client->dev,
+			"No lens shading calibration in the module OTP\n");
+		goto restore_ctrl02;
+	}
+
+	for (i = 0; i < OV8858_LENC_TABLE_SIZE; i++) {
+		ret = ov8858_read(ov8858, OV8858_REG_8BIT(base + i), &val);
+		if (ret)
+			goto restore_ctrl02;
+
+		table[i] = val & 0xff;
+	}
+
+	for (i = 0; i < OV8858_OTP_CHECKSUM_SIZE; i++) {
+		ret = ov8858_read(ov8858,
+				  OV8858_REG_8BIT(OV8858_OTP_AREA_START + i),
+				  &val);
+		if (ret)
+			goto restore_ctrl02;
+
+		sum += val & 0xff;
+	}
+	sum = (sum % 255) + 1;
+
+	for (i = 0; i < ARRAY_SIZE(checksum); i++) {
+		ret = ov8858_read(ov8858,
+				  OV8858_REG_8BIT(OV8858_OTP_CHECKSUM_REG + i),
+				  &val);
+		if (ret)
+			goto restore_ctrl02;
+
+		checksum[i] = val & 0xff;
+	}
+
+	/*
+	 * The checksum lives in 0x720c..0x720e.  Modules that store it zero
+	 * pad the unused bytes, so enforce the sum on every non-zero byte and
+	 * accept an all-zero field as "no checksum stored".
+	 */
+	stored = 0;
+	for (i = 0; i < ARRAY_SIZE(checksum); i++) {
+		if (!checksum[i])
+			continue;
+
+		stored++;
+		if (sum == checksum[i])
+			break;
+	}
+
+	if (stored && i == ARRAY_SIZE(checksum)) {
+		dev_warn(&client->dev,
+			 "Invalid lens shading checksum: %u (0x%02x 0x%02x 0x%02x)\n",
+			 sum, checksum[0], checksum[1], checksum[2]);
+		goto restore_ctrl02;
+	}
+
+	ret = ov8858_read(ov8858, OV8858_REG_ISP_CTRL00, &ctrl00);
+	if (!ret)
+		ret = ov8858_write(ov8858, OV8858_REG_ISP_CTRL00,
+				   ctrl00 | OV8858_ISP_CTRL00_LENC, NULL);
+	if (ret)
+		goto restore_ctrl02;
+
+	memcpy(ov8858->lenc_table, table, sizeof(table));
+	ov8858->lenc_valid = true;
+
+	dev_info(&client->dev,
+		 "Loaded lens shading calibration from the module OTP\n");
+
+	dev_dbg(&client->dev,
+		"OTP flag 0x%02x, checksum %u (0x%02x 0x%02x 0x%02x)\n",
+		flag, sum, checksum[0], checksum[1], checksum[2]);
+
+	ret = ov8858_write_lenc_table(ov8858, table);
+
+restore_ctrl02:
+	ov8858_write(ov8858, OV8858_REG_ISP_CTRL02, ctrl02, NULL);
+
+	if (ov8858_write(ov8858, OV8858_REG_SC_CTRL0100,
+			 OV8858_MODE_SW_STANDBY, NULL))
+		dev_err(&client->dev, "Failed to stop streaming\n");
+
+	return ret;
+}
+
+/* ----------------------------------------------------------------------------
  * Streaming
  */
 
@@ -1346,6 +1595,12 @@ static int ov8858_start_stream(struct ov8858 *ov8858,
 
 	/* 200 usec max to let PLL stabilize. */
 	fsleep(200);
+
+	/* Program the sensor with the lens shading calibration stored
+	 * in the module OTP. */
+	ret = ov8858_apply_otp_lenc(ov8858);
+	if (ret)
+		return ret;
 
 	ret = __v4l2_ctrl_handler_setup(&ov8858->ctrl_handler);
 	if (ret)
