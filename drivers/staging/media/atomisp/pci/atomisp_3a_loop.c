@@ -54,7 +54,6 @@
 #define AE_MAX_FACTOR		366	/* at most 1.43x brighter per step */
 #define AE_DEADBAND		13	/* ~5% luma error: skip adjustment */
 #define AE_PACE_FRAMES		8	/* adjust at most every N frames */
-#define AE_OUTPUT_OFFSET	51	/* BH hist domain vs YUYV output luma */
 
 static void atomisp_3a_awb(struct atomisp_sub_device *asd, u64 gr, u64 r,
 			   u64 b, u64 gb)
@@ -138,11 +137,15 @@ static void atomisp_3a_ae(struct atomisp_sub_device *asd,
 		return;
 
 	/*
-	 * The BH histogram measures a pre-processing domain that sits a
-	 * fixed additive offset below the YUYV output luma (measured on
-	 * OV8858: output = hist + 51 across the 90..154 range).
+	 * The BH histogram mean is used directly as the luma estimate. An
+	 * additive offset between the histogram domain and the YUYV output luma
+	 * was measured on OV8858 (51) and applied unconditionally, but on the
+	 * front OV2740 that offset does not hold: the AE then settled its
+	 * target 110 on hist+51, i.e. an output luma of only ~60, leaving the
+	 * image dark and (through the ISP low-light chroma processing)
+	 * effectively achromatic. Measuring the histogram as-is converges the
+	 * output luma to the target on both sensors.
 	 */
-	mean += AE_OUTPUT_OFFSET;
 
 	factor = clamp_t(u32, AE_TARGET_LUMA * 256 / mean,
 			 AE_MIN_FACTOR, AE_MAX_FACTOR);
