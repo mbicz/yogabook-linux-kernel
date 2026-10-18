@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
@@ -104,6 +105,8 @@ struct ov8858_mode {
 
 struct ov8858 {
 	struct clk		*xvclk;
+	unsigned long		xvclk_rate;
+	s64			link_freq;
 	struct gpio_desc	*reset_gpio;
 	struct gpio_desc	*pwdn_gpio;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(ov8858_supply_names)];
@@ -1222,10 +1225,6 @@ static const struct ov8858_mode ov8858_modes[] = {
 	},
 };
 
-static const s64 link_freq_menu_items[] = {
-	OV8858_LINK_FREQ
-};
-
 static const char * const ov8858_test_pattern_menu[] = {
 	"Disabled",
 	"Vertical Color Bar Type 1",
@@ -1614,10 +1613,8 @@ static int ov8858_power_on(struct ov8858 *ov8858)
 	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
 	struct device *dev = &client->dev;
 	unsigned long delay_us;
+	unsigned int xvclk = ov8858->xvclk_rate;
 	int ret;
-
-	if (clk_get_rate(ov8858->xvclk) != OV8858_XVCLK_FREQ)
-		dev_warn(dev, "xvclk mismatched, modes are based on 24MHz\n");
 
 	ret = clk_prepare_enable(ov8858->xvclk);
 	if (ret < 0) {
@@ -1633,14 +1630,14 @@ static int ov8858_power_on(struct ov8858 *ov8858)
 	}
 
 	/*
-	 * The chip manual only suggests 8192 cycles prior to first SCCB
-	 * transaction, but a double sleep between the release of gpios
-	 * helps with sporadic failures observed at probe time.
+	 * Allow 1 ms after releasing reset before releasing powerdown, as in
+	 * the original sensor power sequence. The shorter SCCB-cycle delay
+	 * here causes NACKs on the first write after runtime resume.
 	 */
-	delay_us = DIV_ROUND_UP(8192, OV8858_XVCLK_FREQ / 1000 / 1000);
+	delay_us = DIV_ROUND_UP_ULL(8192ULL * USEC_PER_SEC, xvclk);
 
 	gpiod_set_value_cansleep(ov8858->reset_gpio, 0);
-	fsleep(delay_us);
+	fsleep(1000);
 	gpiod_set_value_cansleep(ov8858->pwdn_gpio, 0);
 	fsleep(delay_us);
 
@@ -1708,12 +1705,12 @@ static int ov8858_init_ctrls(struct ov8858 *ov8858)
 		return ret;
 
 	ctrl = v4l2_ctrl_new_int_menu(handler, NULL, V4L2_CID_LINK_FREQ,
-				      0, 0, link_freq_menu_items);
+				      0, 0, &ov8858->link_freq);
 	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	/* pixel rate = link frequency * 2 * lanes / bpp */
-	pixel_rate = OV8858_LINK_FREQ * 2 * ov8858->num_lanes / 10;
+	pixel_rate = ov8858->link_freq * 2 * ov8858->num_lanes / 10;
 	v4l2_ctrl_new_std(handler, NULL, V4L2_CID_PIXEL_RATE,
 			  0, pixel_rate, 1, pixel_rate);
 
@@ -1867,10 +1864,21 @@ static int ov8858_parse_of(struct ov8858 *ov8858)
 
 static int ov8858_probe(struct i2c_client *client)
 {
+	struct fwnode_handle *endpoint;
 	struct device *dev = &client->dev;
 	struct v4l2_subdev *sd;
 	struct ov8858 *ov8858;
 	int ret;
+
+	/*
+	 * On ACPI platforms the sensor fwnode graph is created by a bridge
+	 * driver (ipu-bridge / atomisp), possibly after the sensor is enumerated.
+	 */
+	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
+	if (!endpoint)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "waiting for fwnode graph endpoint\n");
+	fwnode_handle_put(endpoint);
 
 	ov8858 = devm_kzalloc(dev, sizeof(*ov8858), GFP_KERNEL);
 	if (!ov8858)
@@ -1880,6 +1888,14 @@ static int ov8858_probe(struct i2c_client *client)
 	if (IS_ERR(ov8858->xvclk))
 		return dev_err_probe(dev, PTR_ERR(ov8858->xvclk),
 				     "Failed to get xvclk\n");
+
+	ov8858->xvclk_rate = clk_get_rate(ov8858->xvclk);
+	if (!ov8858->xvclk_rate)
+		return dev_err_probe(dev, -EINVAL, "Invalid xvclk rate\n");
+
+	/* The unchanged PLL tables scale the lane clock with the input clock. */
+	ov8858->link_freq = div_u64((u64)OV8858_LINK_FREQ *
+				   ov8858->xvclk_rate, OV8858_XVCLK_FREQ);
 
 	ov8858->reset_gpio = devm_gpiod_get_optional(dev, "reset",
 						     GPIOD_OUT_HIGH);
@@ -1981,11 +1997,19 @@ static const struct of_device_id ov8858_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, ov8858_of_match);
 
+static const struct acpi_device_id ov8858_acpi_ids[] = {
+	/* Lenovo Yoga Book YB1-X90F rear camera; the _HID is shared with OV5693 */
+	{ "INT33BE" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(acpi, ov8858_acpi_ids);
+
 static struct i2c_driver ov8858_i2c_driver = {
 	.driver = {
 		.name = "ov8858",
 		.pm = &ov8858_pm_ops,
 		.of_match_table = ov8858_of_match,
+		.acpi_match_table = ov8858_acpi_ids,
 	},
 	.probe		= ov8858_probe,
 	.remove		= ov8858_remove,
