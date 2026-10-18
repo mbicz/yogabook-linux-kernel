@@ -13,12 +13,18 @@
 
 #include "ia_css_wb.host.h"
 
+/*
+ * Start from the typical neutral gains of the green-heavy OV sensors on this
+ * platform (R 2.13x, B 1.75x, u3.13) instead of 1.0x: the in-kernel AWB only
+ * has statistics after the first frame, and unity gains make that first frame
+ * of every stream flash green.
+ */
 const struct ia_css_wb_config default_wb_config = {
-	1,
-	32768,
-	32768,
-	32768,
-	32768
+	3,
+	8192,
+	17467,
+	14296,
+	8192
 };
 
 void
