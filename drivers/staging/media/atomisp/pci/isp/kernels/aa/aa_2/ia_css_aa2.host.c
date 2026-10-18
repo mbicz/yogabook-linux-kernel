@@ -14,10 +14,10 @@
 
 /* YUV Anti-Aliasing configuration. */
 const struct ia_css_aa_config default_aa_config = {
-	8191 /* default should be 0 */
+	0 /* 0 = ineffective; 8191 averages Bayer channels and kills chroma */
 };
 
 /* Bayer Anti-Aliasing configuration. */
 const struct ia_css_aa_config default_baa_config = {
-	8191 /* default should be 0 */
+	0 /* 0 = ineffective; 8191 averages Bayer channels and kills chroma */
 };
