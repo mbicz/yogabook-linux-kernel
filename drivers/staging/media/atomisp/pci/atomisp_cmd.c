@@ -3870,9 +3870,14 @@ int atomisp_try_fmt(struct atomisp_device *isp, struct v4l2_pix_format *f,
 	    f->pixelformat == V4L2_PIX_FMT_CUSTOM_M10MO_RAW)
 		goto out_fill_pix_format;
 
-	/* app vs isp */
+	/*
+	 * app vs isp. Keep the width a multiple of 64 so that planar YUV420
+	 * rows need no padding (ia_css_frame_pad_width()): consumers such as
+	 * GStreamer's pipewiresrc mis-compute the chroma stride of padded
+	 * frames and render sheared, broken colour.
+	 */
 	f->width = rounddown(clamp_t(u32, f->width, ATOM_ISP_MIN_WIDTH,
-				     ATOM_ISP_MAX_WIDTH), ATOM_ISP_STEP_WIDTH);
+				     ATOM_ISP_MAX_WIDTH), 64);
 	f->height = rounddown(clamp_t(u32, f->height, ATOM_ISP_MIN_HEIGHT,
 				      ATOM_ISP_MAX_HEIGHT), ATOM_ISP_STEP_HEIGHT);
 

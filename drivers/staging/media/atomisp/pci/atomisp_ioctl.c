@@ -547,6 +547,8 @@ static int atomisp_enum_framesizes(struct file *file, void *priv,
 		.code = input->code,
 	};
 	struct v4l2_subdev_state *act_sd_state;
+	unsigned int valid = 0;
+	u32 width, height;
 	int ret;
 
 	if (!input->sensor)
@@ -555,17 +557,33 @@ static int atomisp_enum_framesizes(struct file *file, void *priv,
 	if (input->crop_support)
 		return atomisp_enum_framesizes_crop(isp, fsize);
 
-	act_sd_state = v4l2_subdev_lock_and_get_active_state(input->sensor);
-	ret = v4l2_subdev_call(input->sensor, pad, enum_frame_size,
-			       act_sd_state, &fse);
-	if (act_sd_state)
-		v4l2_subdev_unlock_state(act_sd_state);
-	if (ret)
-		return ret;
+	/*
+	 * Report only sizes atomisp_try_fmt() will actually deliver: the
+	 * preview pipeline is limited to 1920x1440, and widths are kept a
+	 * multiple of 64 so planar YUV420 rows need no padding (consumers such
+	 * as GStreamer's pipewiresrc mis-compute padded chroma strides).
+	 */
+	for (fse.index = 0; ; fse.index++) {
+		act_sd_state = v4l2_subdev_lock_and_get_active_state(input->sensor);
+		ret = v4l2_subdev_call(input->sensor, pad, enum_frame_size,
+				       act_sd_state, &fse);
+		if (act_sd_state)
+			v4l2_subdev_unlock_state(act_sd_state);
+		if (ret)
+			return ret;
+
+		width = ALIGN_DOWN(fse.max_width - pad_w, 64);
+		height = fse.max_height - pad_h;
+		if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW &&
+		    (width > 1920 || height > 1440))
+			continue;
+		if (valid++ == fsize->index)
+			break;
+	}
 
 	fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-	fsize->discrete.width = fse.max_width - pad_w;
-	fsize->discrete.height = fse.max_height - pad_h;
+	fsize->discrete.width = width;
+	fsize->discrete.height = height;
 
 	return 0;
 }
