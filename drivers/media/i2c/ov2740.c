@@ -936,6 +936,58 @@ err:
 	return ret;
 }
 
+/*
+ * Apply the module's factory lens-shading (LENC) calibration from OTP, as the
+ * vendor Android driver does. Without it the image vignettes and the corners
+ * take a green/cyan tint. OTP layout (offsets from 0x7010): flag byte at 0,
+ * LENC group 1 valid when (flag & 0x0c) == 0x04, table of 240 bytes at 0x0f,
+ * checksum of 0x01..0xfe modulo 255 at 0xff.
+ */
+#define OV2740_REG_LENC_TABLE		0x5800
+#define OV2740_LENC_TABLE_SIZE		240
+#define OV2740_OTP_LENC_OFFSET		0x0f
+#define OV2740_ISP_CTRL00_LENC_EN	BIT(7)
+
+static void ov2740_apply_otp_lenc(struct ov2740 *ov2740)
+{
+	const u8 *otp;
+	u32 sum = 0, isp_ctrl00;
+	unsigned int i;
+	int ret;
+
+	if (!ov2740->nvm || !ov2740->nvm->nvm_buffer)
+		return;
+
+	otp = (const u8 *)ov2740->nvm->nvm_buffer;
+	if ((otp[0] & 0x0c) != 0x04)
+		return;
+
+	for (i = 0x01; i <= 0xfe; i++)
+		sum += otp[i];
+	if (sum % 255 != otp[0xff]) {
+		dev_warn(ov2740->dev, "OTP checksum mismatch, LENC not applied\n");
+		return;
+	}
+
+	for (i = 0; i < OV2740_LENC_TABLE_SIZE; i++) {
+		ret = ov2740_write_reg(ov2740, OV2740_REG_LENC_TABLE + i, 1,
+				       otp[OV2740_OTP_LENC_OFFSET + i]);
+		if (ret)
+			goto err;
+	}
+
+	ret = ov2740_read_reg(ov2740, OV2740_REG_ISP_CTRL00, 1, &isp_ctrl00);
+	if (ret)
+		goto err;
+
+	ret = ov2740_write_reg(ov2740, OV2740_REG_ISP_CTRL00, 1,
+			       isp_ctrl00 | OV2740_ISP_CTRL00_LENC_EN);
+	if (!ret)
+		return;
+err:
+	dev_warn(ov2740->dev, "failed to apply OTP LENC: %d\n", ret);
+}
+
 static int ov2740_start_streaming(struct ov2740 *ov2740)
 {
 	const struct ov2740_reg_list *reg_list;
@@ -976,6 +1028,8 @@ static int ov2740_start_streaming(struct ov2740 *ov2740)
 	ret = __v4l2_ctrl_handler_setup(ov2740->sd.ctrl_handler);
 	if (ret)
 		return ret;
+
+	ov2740_apply_otp_lenc(ov2740);
 
 	ret = ov2740_write_reg(ov2740, OV2740_REG_MODE_SELECT, 1,
 			       OV2740_MODE_STREAMING);
