@@ -967,7 +967,7 @@ static void ov2740_apply_otp_lenc(struct ov2740 *ov2740)
 	for (i = 0x01; i <= 0xfe; i++)
 		sum += otp[i];
 	if (sum % 255 != otp[0xff]) {
-		dev_warn(ov2740->dev, "OTP checksum mismatch, LENC not applied\n");
+		dev_warn(ov2740->sd.dev, "OTP checksum mismatch, LENC not applied\n");
 		return;
 	}
 
@@ -987,7 +987,7 @@ static void ov2740_apply_otp_lenc(struct ov2740 *ov2740)
 	if (!ret)
 		return;
 err:
-	dev_warn(ov2740->dev, "failed to apply OTP LENC: %d\n", ret);
+	dev_warn(ov2740->sd.dev, "failed to apply OTP LENC: %d\n", ret);
 }
 
 static int ov2740_start_streaming(struct ov2740 *ov2740)
