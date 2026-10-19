@@ -1433,20 +1433,19 @@ static int ov8858_write_lenc_table(struct ov8858 *ov8858, const u8 *table)
 }
 
 /*
- * Read the lens-shading calibration from the module OTP and program the LENC
- * block with it. Reading the calibration requires the OTP buffer to be loaded,
- * which can only be triggered while the sensor is streaming.
+ * Read the lens-shading calibration from the module OTP and cache it. Loading
+ * the OTP buffer is only possible while the sensor is streaming, so this must
+ * run before a receiver is armed: called once from probe, never from a stream
+ * start, where the extra streaming burst wedges the receiver. The sensor must
+ * be powered and programmed; it is left in software standby.
  */
-static int ov8858_apply_otp_lenc(struct ov8858 *ov8858)
+static int ov8858_read_otp_lenc(struct ov8858 *ov8858)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
 	u8 table[OV8858_LENC_TABLE_SIZE];
-	u32 checksum[3], flag, ctrl00, ctrl02, val;
+	u32 checksum[3], flag, ctrl02, val;
 	unsigned int base, sum = 0, stored, i;
 	int ret;
-
-	if (ov8858->lenc_valid)
-		return ov8858_write_lenc_table(ov8858, ov8858->lenc_table);
 
 	ret = ov8858_write(ov8858, OV8858_REG_SC_CTRL0100,
 			   OV8858_MODE_STREAMING, NULL);
@@ -1459,9 +1458,11 @@ static int ov8858_apply_otp_lenc(struct ov8858 *ov8858)
 	 * correction, disable it while the buffer is read.
 	 */
 	ret = ov8858_read(ov8858, OV8858_REG_ISP_CTRL02, &ctrl02);
-	if (!ret)
-		ret = ov8858_write(ov8858, OV8858_REG_ISP_CTRL02,
-				   ctrl02 & ~OV8858_ISP_CTRL02_OTP_DPC, NULL);
+	if (ret)
+		goto standby;
+
+	ret = ov8858_write(ov8858, OV8858_REG_ISP_CTRL02,
+			   ctrl02 & ~OV8858_ISP_CTRL02_OTP_DPC, NULL);
 	if (ret)
 		goto restore_ctrl02;
 
@@ -1535,13 +1536,6 @@ static int ov8858_apply_otp_lenc(struct ov8858 *ov8858)
 		goto restore_ctrl02;
 	}
 
-	ret = ov8858_read(ov8858, OV8858_REG_ISP_CTRL00, &ctrl00);
-	if (!ret)
-		ret = ov8858_write(ov8858, OV8858_REG_ISP_CTRL00,
-				   ctrl00 | OV8858_ISP_CTRL00_LENC, NULL);
-	if (ret)
-		goto restore_ctrl02;
-
 	memcpy(ov8858->lenc_table, table, sizeof(table));
 	ov8858->lenc_valid = true;
 
@@ -1552,11 +1546,10 @@ static int ov8858_apply_otp_lenc(struct ov8858 *ov8858)
 		"OTP flag 0x%02x, checksum %u (0x%02x 0x%02x 0x%02x)\n",
 		flag, sum, checksum[0], checksum[1], checksum[2]);
 
-	ret = ov8858_write_lenc_table(ov8858, table);
-
 restore_ctrl02:
 	ov8858_write(ov8858, OV8858_REG_ISP_CTRL02, ctrl02, NULL);
 
+standby:
 	if (ov8858_write(ov8858, OV8858_REG_SC_CTRL0100,
 			 OV8858_MODE_SW_STANDBY, NULL))
 		dev_err(&client->dev, "Failed to stop streaming\n");
@@ -1564,26 +1557,37 @@ restore_ctrl02:
 	return ret;
 }
 
-/* ----------------------------------------------------------------------------
- * Streaming
- */
-
-static int ov8858_start_stream(struct ov8858 *ov8858,
-			       struct v4l2_subdev_state *state)
+/* Program the cached lens-shading calibration and enable the LENC block. */
+static int ov8858_apply_lenc(struct ov8858 *ov8858)
 {
-	struct v4l2_mbus_framefmt *format;
-	const struct ov8858_mode *mode;
+	u32 ctrl00;
+	int ret;
+
+	if (!ov8858->lenc_valid)
+		return 0;
+
+	ret = ov8858_write_lenc_table(ov8858, ov8858->lenc_table);
+	if (ret)
+		return ret;
+
+	ret = ov8858_read(ov8858, OV8858_REG_ISP_CTRL00, &ctrl00);
+	if (ret)
+		return ret;
+
+	return ov8858_write(ov8858, OV8858_REG_ISP_CTRL00,
+			    ctrl00 | OV8858_ISP_CTRL00_LENC, NULL);
+}
+
+/* Write the global and the mode registers; the sensor stays in standby. */
+static int ov8858_program_mode(struct ov8858 *ov8858,
+			       const struct ov8858_mode *mode)
+{
 	const struct regval *reg_list;
 	int ret;
 
 	ret = ov8858_write_array(ov8858, ov8858->global_regs);
 	if (ret)
 		return ret;
-
-	format = v4l2_subdev_state_get_format(state, 0);
-	mode = v4l2_find_nearest_size(ov8858_modes, ARRAY_SIZE(ov8858_modes),
-				      width, height, format->width,
-				      format->height);
 
 	reg_list = ov8858->num_lanes == 4
 		 ? mode->reg_modes.mode_4lanes
@@ -1596,11 +1600,30 @@ static int ov8858_start_stream(struct ov8858 *ov8858,
 	/* 200 usec max to let PLL stabilize. */
 	fsleep(200);
 
-	/*
-	 * Program the sensor with the lens shading calibration stored in
-	 * the module OTP.
-	 */
-	ret = ov8858_apply_otp_lenc(ov8858);
+	return 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * Streaming
+ */
+
+static int ov8858_start_stream(struct ov8858 *ov8858,
+			       struct v4l2_subdev_state *state)
+{
+	struct v4l2_mbus_framefmt *format;
+	const struct ov8858_mode *mode;
+	int ret;
+
+	format = v4l2_subdev_state_get_format(state, 0);
+	mode = v4l2_find_nearest_size(ov8858_modes, ARRAY_SIZE(ov8858_modes),
+				      width, height, format->width,
+				      format->height);
+
+	ret = ov8858_program_mode(ov8858, mode);
+	if (ret)
+		return ret;
+
+	ret = ov8858_apply_lenc(ov8858);
 	if (ret)
 		return ret;
 
@@ -2207,6 +2230,17 @@ static int ov8858_probe(struct i2c_client *client)
 	ret = ov8858_check_sensor_id(ov8858);
 	if (ret)
 		goto err_power_off;
+
+	/*
+	 * Cache the lens-shading calibration now, while no receiver can be
+	 * streaming from the sensor. A missing or unreadable calibration only
+	 * leaves the LENC block uncalibrated.
+	 */
+	ret = ov8858_program_mode(ov8858, &ov8858_modes[0]);
+	if (!ret)
+		ret = ov8858_read_otp_lenc(ov8858);
+	if (ret)
+		dev_warn(dev, "Lens shading calibration not read: %d\n", ret);
 
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
