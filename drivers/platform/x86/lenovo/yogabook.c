@@ -6,7 +6,9 @@
  * The keyboard half of the YB1 models can function as both a capacitive
  * touch keyboard or as a Wacom digitizer, but not at the same time.
  *
- * This driver takes care of switching between the 2 functions.
+ * This driver takes care of switching between the 2 functions. It also
+ * reports the back-side hall sensor, which closes when the keyboard half is
+ * folded behind the screen, as SW_TABLET_MODE.
  *
  * Copyright 2023 Hans de Goede <hansg@kernel.org>
  */
@@ -15,6 +17,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
+#include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/leds.h>
 #include <linux/module.h>
@@ -47,6 +50,7 @@ struct yogabook_data {
 	struct device *kbd_dev;
 	struct device *dig_dev;
 	struct led_classdev *pen_led;
+	struct input_dev *tablet_sw;
 	struct gpio_desc *pen_touch_event;
 	struct gpio_desc *kbd_bl_led_enable;
 	struct gpio_desc *backside_hall_gpio;
@@ -132,15 +136,24 @@ static void yogabook_toggle_digitizer_mode(struct yogabook_data *data)
 	schedule_work(&data->work);
 }
 
-static irqreturn_t yogabook_backside_hall_irq(int irq, void *_data)
+static void yogabook_update_tablet_mode(struct yogabook_data *data)
 {
-	struct yogabook_data *data = _data;
+	bool tablet = gpiod_get_value(data->backside_hall_gpio);
 
-	if (gpiod_get_value(data->backside_hall_gpio))
+	if (tablet)
 		set_bit(YB_TABLET_MODE, &data->flags);
 	else
 		clear_bit(YB_TABLET_MODE, &data->flags);
 
+	input_report_switch(data->tablet_sw, SW_TABLET_MODE, tablet);
+	input_sync(data->tablet_sw);
+}
+
+static irqreturn_t yogabook_backside_hall_irq(int irq, void *_data)
+{
+	struct yogabook_data *data = _data;
+
+	yogabook_update_tablet_mode(data);
 	schedule_work(&data->work);
 
 	return IRQ_HANDLED;
@@ -217,6 +230,22 @@ static int yogabook_probe(struct device *dev, struct yogabook_data *data,
 
 	data->backside_hall_irq = r;
 
+	data->tablet_sw = devm_input_allocate_device(dev);
+	if (!data->tablet_sw)
+		return -ENOMEM;
+
+	data->tablet_sw->name = "Lenovo Yoga Book Tablet Mode Switch";
+	data->tablet_sw->phys = YB_PDEV_NAME "/input0";
+	data->tablet_sw->id.bustype = BUS_HOST;
+	input_set_capability(data->tablet_sw, EV_SW, SW_TABLET_MODE);
+
+	r = input_register_device(data->tablet_sw);
+	if (r)
+		return dev_err_probe(dev, r, "Registering tablet mode switch\n");
+
+	/* Report the initial state, before the first hall sensor change */
+	yogabook_update_tablet_mode(data);
+
 	/* Set default brightness before enabling the IRQ */
 	data->set_kbd_backlight(data, YB_KBD_BL_DEFAULT);
 
@@ -287,7 +316,8 @@ static int yogabook_resume(struct device *dev)
 
 	clear_bit(YB_SUSPENDED, &data->flags);
 
-	/* Check for YB_TABLET_MODE changes made during suspend */
+	/* Check for tablet mode changes made during suspend */
+	yogabook_update_tablet_mode(data);
 	schedule_work(&data->work);
 
 	return 0;
