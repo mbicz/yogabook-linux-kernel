@@ -61,6 +61,7 @@ enum ipu_sensor_swnodes {
 	SWNODE_IVSC_IPU_PORT,
 	SWNODE_IVSC_IPU_ENDPOINT,
 	SWNODE_VCM,
+	SWNODE_VCM_GPIO,
 	SWNODE_COUNT
 };
 
@@ -145,12 +146,14 @@ struct ipu_sensor {
 	struct property_entry dev_properties[5];
 	struct property_entry ipu_properties[3];
 	struct property_entry ivsc_properties[1];
+	struct property_entry vcm_properties[2];
 	struct property_entry ivsc_sensor_ep_properties[4];
 	struct property_entry ivsc_ipu_ep_properties[4];
 
 	struct software_node_ref_args local_ref[1];
 	struct software_node_ref_args remote_ref[1];
 	struct software_node_ref_args vcm_ref[1];
+	struct software_node_ref_args vcm_gpio_ref[1];
 	struct software_node_ref_args ivsc_sensor_ref[1];
 	struct software_node_ref_args ivsc_ipu_ref[1];
 };

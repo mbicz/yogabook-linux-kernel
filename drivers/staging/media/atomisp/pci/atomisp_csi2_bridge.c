@@ -479,8 +479,15 @@ static int atomisp_csi2_parse_sensor_fwnode(struct acpi_device *adev,
 	sensor->orientation = (sensor->link == 1) ?
 		V4L2_FWNODE_ORIENTATION_BACK : V4L2_FWNODE_ORIENTATION_FRONT;
 
-	if (vcm)
+	/* The Yoga Book's OV8858 has a WV517, despite its AD5823 _DSM. */
+	if (acpi_dev_hid_uid_match(adev, "INT33BE", NULL) &&
+	    dmi_match(DMI_SYS_VENDOR, "Intel Corporation") &&
+	    dmi_match(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM") &&
+	    dmi_match(DMI_PRODUCT_VERSION, "YETI-11")) {
+		sensor->vcm_type = "wv517";
+	} else if (vcm) {
 		sensor->vcm_type = atomisp_csi2_get_vcm_type(adev);
+	}
 
 	return 0;
 }
