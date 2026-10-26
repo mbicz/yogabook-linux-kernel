@@ -175,6 +175,31 @@ static const struct override_status_id override_status_ids[] = {
 		DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
 		DMI_MATCH(DMI_PRODUCT_FAMILY, "YOGATablet2"),
 	      }),
+
+	/*
+	 * The Lenovo Yoga Book YB1-X90 (YETI-11) DSDT describes its BCM4752 GPS
+	 * twice: GPS0 (always present) and GPS1 (present when OSID == 1). Both
+	 * use the same UART and shutdown GPIO, so only one can bind; GPS0 also
+	 * has the host-wake interrupt. Ignore GPS1.
+	 */
+	NOT_PRESENT_ENTRY_PATH("\\_SB_.PCI0.URT2.GPS1", INTEL_ATOM_AIRMONT, {
+		DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "YETI-11"),
+	      }),
+
+	/*
+	 * The Yoga Book YB1-X90 also exposes the Windows "GPIO VIRTUAL"
+	 * controller as a fifth INT33FF (UID 5). Cherry Trail has four pin
+	 * communities (UID 1-4), so cherryview-pinctrl cannot bind it; Linux
+	 * handles the virtual GPIO wake through INT0002 instead. Match by path:
+	 * a HID match only sees present devices, so it would not stay applied.
+	 */
+	NOT_PRESENT_ENTRY_PATH("\\_SB_.GPO4", INTEL_ATOM_AIRMONT, {
+		DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+		DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "YETI-11"),
+	      }),
 };
 
 bool acpi_device_override_status(struct acpi_device *adev, unsigned long long *status)
