@@ -959,6 +959,8 @@ int atomisp_css_start(struct atomisp_sub_device *asd)
 	bool sp_is_started = false;
 	int ret = 0, i = 0;
 
+	atomisp_3a_loop_init(asd);
+
 	if (!sh_css_hrt_system_is_idle())
 		dev_err(isp->dev, "CSS HW not idle before starting SP\n");
 

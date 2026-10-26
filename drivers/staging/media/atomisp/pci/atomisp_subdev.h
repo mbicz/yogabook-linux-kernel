@@ -255,6 +255,23 @@ struct atomisp_sub_device {
 	struct list_head s3a_stats_in_css;
 	/* The list of s3a stat buffers which are ready for userspace to get */
 	struct list_head s3a_stats_ready;
+	/*
+	 * In-kernel 3A loop state (atomisp_3a_loop.c): gray-world AWB and
+	 * paced AE driven by the s3a statistics.
+	 */
+	bool awb_en;
+	bool ae_en;
+	unsigned int ae_pace;
+	u32 awb_r;
+	u32 awb_b;
+	u32 tone_a;		/* applied tone lift, Q8 (0 = plain sRGB curve) */
+	/* AE highlight servo (atomisp_3a_ae): see the comment there. */
+	u32 ae_slope;		/* permille clip per 100% exposure */
+	s32 ae_mean_f;		/* measured mean luma EMA, Q8 */
+	s32 ae_last_exp;	/* exposure behind the previous measurement */
+	s32 ae_prev_exp;	/* exposure behind the one before that */
+	unsigned int ae_last_clip;	/* clip measured with ae_prev_exp */
+	s32 ae_knee_exp;	/* exposure at which clipping starts */
 
 	struct list_head dis_stats;
 	struct list_head dis_stats_in_css;
