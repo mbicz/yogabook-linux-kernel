@@ -67,7 +67,8 @@
 #define OV8858_LONG_DIGIGAIN_MIN	0x0
 #define OV8858_LONG_DIGIGAIN_MAX	0x3fff
 #define OV8858_LONG_DIGIGAIN_STEP	1
-#define OV8858_LONG_DIGIGAIN_DEFAULT	0x200
+/* The packed control value 0x100 writes 0x0400, the sensor's 1x gain. */
+#define OV8858_LONG_DIGIGAIN_DEFAULT	0x100
 
 #define OV8858_REG_VTS			OV8858_REG_16BIT(0x380e)
 #define OV8858_VTS_MAX			0x7fff
@@ -1687,6 +1688,19 @@ static const struct v4l2_subdev_video_ops ov8858_video_ops = {
  * Pad ops
  */
 
+static int ov8858_update_exposure_range(struct ov8858 *ov8858,
+					const struct ov8858_mode *mode,
+					s64 vblank)
+{
+	s64 max_exp = mode->height + vblank - OV8858_EXPOSURE_MARGIN;
+
+	/* A mode change or shorter frame must not leave the default above max. */
+	return __v4l2_ctrl_modify_range(ov8858->exposure,
+					OV8858_EXPOSURE_MIN, max_exp,
+					OV8858_EXPOSURE_STEP,
+					min_t(s64, mode->exp_def, max_exp));
+}
+
 static int ov8858_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *state,
 			  struct v4l2_subdev_format *fmt)
@@ -1694,6 +1708,7 @@ static int ov8858_set_fmt(struct v4l2_subdev *sd,
 	struct ov8858 *ov8858 = sd_to_ov8858(sd);
 	const struct ov8858_mode *mode;
 	s64 h_blank, vblank_def;
+	int ret;
 
 	mode = v4l2_find_nearest_size(ov8858_modes, ARRAY_SIZE(ov8858_modes),
 				      width, height, fmt->format.width,
@@ -1712,15 +1727,20 @@ static int ov8858_set_fmt(struct v4l2_subdev *sd,
 
 	/* Adjust control limits when a new mode is applied. */
 	h_blank = mode->hts_def - mode->width;
-	__v4l2_ctrl_modify_range(ov8858->hblank, h_blank, h_blank, 1,
-				 h_blank);
+	ret = __v4l2_ctrl_modify_range(ov8858->hblank, h_blank, h_blank, 1,
+				      h_blank);
+	if (ret)
+		return ret;
 
 	vblank_def = mode->vts_def - mode->height;
-	__v4l2_ctrl_modify_range(ov8858->vblank, vblank_def,
-				 OV8858_VTS_MAX - mode->height, 1,
-				 vblank_def);
+	ret = __v4l2_ctrl_modify_range(ov8858->vblank, vblank_def,
+				      OV8858_VTS_MAX - mode->height, 1,
+				      vblank_def);
+	if (ret)
+		return ret;
 
-	return 0;
+	/* VBLANK may stay unchanged across modes, so refresh exposure here too. */
+	return ov8858_update_exposure_range(ov8858, mode, ov8858->vblank->val);
 }
 
 static int ov8858_enum_frame_sizes(struct v4l2_subdev *sd,
@@ -1809,9 +1829,9 @@ static int ov8858_set_ctrl(struct v4l2_ctrl *ctrl)
 
 	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
 	struct v4l2_mbus_framefmt *format;
+	const struct ov8858_mode *mode;
 	struct v4l2_subdev_state *state;
 	u16 digi_gain;
-	s64 max_exp;
 	int ret;
 
 	/*
@@ -1826,12 +1846,14 @@ static int ov8858_set_ctrl(struct v4l2_ctrl *ctrl)
 	/* Propagate change of current control to all related controls */
 	switch (ctrl->id) {
 	case V4L2_CID_VBLANK:
-		/* Update max exposure while meeting expected vblanking */
-		max_exp = format->height + ctrl->val - OV8858_EXPOSURE_MARGIN;
-		__v4l2_ctrl_modify_range(ov8858->exposure,
-					 ov8858->exposure->minimum, max_exp,
-					 ov8858->exposure->step,
-					 ov8858->exposure->default_value);
+		/* Update exposure for the active mode, even after reducing VBLANK. */
+		mode = v4l2_find_nearest_size(ov8858_modes,
+					      ARRAY_SIZE(ov8858_modes),
+					      width, height, format->width,
+					      format->height);
+		ret = ov8858_update_exposure_range(ov8858, mode, ctrl->val);
+		if (ret)
+			return ret;
 		break;
 	}
 

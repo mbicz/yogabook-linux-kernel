@@ -259,6 +259,7 @@ void atomisp_buf_done(struct atomisp_sub_device *asd, int error,
 		      enum ia_css_pipe_id css_pipe_id,
 		      bool q_buffers, enum atomisp_input_stream_id stream_id);
 
+void atomisp_3a_loop_init(struct atomisp_sub_device *asd);
 void atomisp_3a_loop_frame_done(struct atomisp_sub_device *asd);
 
 /* Events. Only one event has to be exported for now. */
