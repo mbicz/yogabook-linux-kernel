@@ -59,6 +59,13 @@ static struct lp855x_platform_data lenovo_lp8557_reg_only_pdata = {
 	.initial_brightness = 128,
 };
 
+static int lenovo_efi_power_off(struct sys_off_data *data)
+{
+	efi.reset_system(EFI_RESET_SHUTDOWN, EFI_SUCCESS, 0, NULL);
+
+	return NOTIFY_DONE;
+}
+
 /* Lenovo Yoga Book X90F / X90L's Android factory image has everything hardcoded */
 
 static const struct property_entry lenovo_yb1_x90_wacom_props[] = {
@@ -362,6 +369,15 @@ static int __init lenovo_yb1_x90_init(struct device *dev)
 
 	/* Vprog5B 1.8V used by the goodix touchscreen in the keyboard half */
 	intel_soc_pmic_exec_mipi_pmic_seq_element(0x6e, 0xa1, 0x02, 0xff);
+
+	/*
+	 * The Android firmware advertises ACPI S5, but using it restarts the
+	 * Yoga Book instead of leaving it off. Use firmware shutdown instead.
+	 */
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_RESET_SYSTEM))
+		return devm_register_sys_off_handler(dev, SYS_OFF_MODE_POWER_OFF,
+						    SYS_OFF_PRIO_FIRMWARE + 1,
+						    lenovo_efi_power_off, NULL);
 
 	return 0;
 }
@@ -733,12 +749,6 @@ err_put_device:
  * followed by a normal 3 second press to recover. Avoid this by doing an EFI
  * poweroff instead.
  */
-static int lenovo_yoga_tab2_830_1050_power_off(struct sys_off_data *data)
-{
-	efi.reset_system(EFI_RESET_SHUTDOWN, EFI_SUCCESS, 0, NULL);
-
-	return NOTIFY_DONE;
-}
 
 static int __init lenovo_yoga_tab2_830_1050_init(struct device *dev)
 {
@@ -755,7 +765,7 @@ static int __init lenovo_yoga_tab2_830_1050_init(struct device *dev)
 	/* SYS_OFF_PRIO_FIRMWARE + 1 so that it runs before acpi_power_off() */
 	lenovo_yoga_tab2_830_1050_sys_off_handler =
 		register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_FIRMWARE + 1,
-					 lenovo_yoga_tab2_830_1050_power_off, NULL);
+					 lenovo_efi_power_off, NULL);
 	if (IS_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler))
 		return PTR_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler);
 
@@ -951,7 +961,7 @@ static int __init lenovo_yoga_tab2_1380_init(struct device *dev)
 	/* SYS_OFF_PRIO_FIRMWARE + 1 so that it runs before acpi_power_off() */
 	lenovo_yoga_tab2_830_1050_sys_off_handler =
 		register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_FIRMWARE + 1,
-					 lenovo_yoga_tab2_830_1050_power_off, NULL);
+					 lenovo_efi_power_off, NULL);
 	if (IS_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler))
 		return PTR_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler);
 
