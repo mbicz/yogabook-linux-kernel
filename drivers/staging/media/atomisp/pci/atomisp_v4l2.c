@@ -63,11 +63,16 @@ MODULE_PARM_DESC(dbg_func,
  * output res, and isp output res. however since we do not have this yet,
  * the chosen solution is the next best thing.
  */
-int pad_w = 16;
+/*
+ * 12 is the ISP2400 minimum (ISP2401 has none) and turns the 1932x1092
+ * OV2740/OV8858 arrays into exactly 1920x1080. With 16 the frame is 1916 wide
+ * in 1920-byte rows, which GStreamer pipewiresrc misreads (broken chroma).
+ */
+int pad_w = 12;
 module_param(pad_w, int, 0644);
 MODULE_PARM_DESC(pad_w, "extra data for ISP processing");
 
-int pad_h = 16;
+int pad_h = 12;
 module_param(pad_h, int, 0644);
 MODULE_PARM_DESC(pad_h, "extra data for ISP processing");
 
