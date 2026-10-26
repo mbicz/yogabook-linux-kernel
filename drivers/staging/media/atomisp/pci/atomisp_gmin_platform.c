@@ -594,8 +594,7 @@ static int gmin_subdev_add(struct gmin_subdev *gs)
 	switch (pmic_id) {
 	case PMIC_REGULATOR:
 		gs->v1p8_reg = regulator_get(dev, "V1P8SX");
-//		gs->v2p8_reg = regulator_get(dev, "V2P8SX");
-		gs->v2p8_vcm_reg = regulator_get(dev, "VPROG4B");
+		gs->v2p8_reg = regulator_get(dev, "V2P8SX");
 
 		gs->v1p2_reg = regulator_get(dev, "V1P2SX");
 //		gs->v1p2_reg = regulator_get(dev, "V1P2A");
@@ -1112,6 +1111,10 @@ gmin_camera_platform_data(struct v4l2_subdev *subdev,
 	struct gmin_subdev *gs;
 
 	gs = find_free_gmin_subdev_slot();
+	if (!gs) {
+		dev_err(subdev->dev, "no free gmin subdev slot\n");
+		return NULL;
+	}
 	gs->subdev = subdev;
 	gs->csi_fmt = csi_format;
 	gs->csi_bayer = csi_bayer;
