@@ -824,6 +824,15 @@ config VIDEO_DW9807_VCM
 	  capability. This is designed for linear control of
 	  voice coil motors, controlled via I2C serial interface.
 
+config VIDEO_WV517
+	tristate "WV517 lens voice coil support"
+	depends on GPIOLIB && PM
+	help
+	  This is a driver for the WV517 10-bit camera lens voice coil
+	  actuator used by the Lenovo Yoga Book OV8858 camera module.
+	  It is controlled over I2C and uses an active-high enable GPIO.
+	  Closing the lens subdevice parks it and removes actuator power.
+
 endif
 
 menu "Flash devices"

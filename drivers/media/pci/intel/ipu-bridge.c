@@ -5,6 +5,8 @@
 #include <acpi/acpi_bus.h>
 #include <linux/cleanup.h>
 #include <linux/device.h>
+#include <linux/dmi.h>
+#include <linux/gpio/machine.h>
 #include <linux/i2c.h>
 #include <linux/mei_cl_bus.h>
 #include <linux/platform_device.h>
@@ -387,6 +389,25 @@ static void ipu_bridge_create_fwnode_properties(
 			SOFTWARE_NODE_REFERENCE(&sensor->swnodes[SWNODE_VCM]);
 		sensor->dev_properties[3] =
 			PROPERTY_ENTRY_REF_ARRAY("lens-focus", sensor->vcm_ref);
+		if (!strcmp(cfg->hid, "INT33BE") &&
+		    dmi_match(DMI_SYS_VENDOR, "Intel Corporation") &&
+		    dmi_match(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM") &&
+		    dmi_match(DMI_PRODUCT_VERSION, "YETI-11") &&
+		    !strcmp(sensor->vcm_type, "wv517")) {
+			/*
+			 * The motor's active-high power gate is missing from
+			 * the sensor's ACPI resources. Keep this board wiring
+			 * out of the generic actuator driver.
+			 */
+			nodes[SWNODE_VCM_GPIO].name = "INT33FF:01";
+			nodes[SWNODE_VCM_GPIO].parent = &nodes[SWNODE_SENSOR_HID];
+			sensor->vcm_gpio_ref[0] =
+				SOFTWARE_NODE_REFERENCE(&nodes[SWNODE_VCM_GPIO],
+							45, GPIO_ACTIVE_HIGH);
+			sensor->vcm_properties[0] =
+				PROPERTY_ENTRY_REF_ARRAY("enable-gpios",
+							 sensor->vcm_gpio_ref);
+		}
 	}
 
 	sensor->ep_properties[0] = PROPERTY_ENTRY_U32(
@@ -443,33 +464,27 @@ static void ipu_bridge_init_swnode_names(struct ipu_sensor *sensor)
 static void ipu_bridge_init_swnode_group(struct ipu_sensor *sensor)
 {
 	struct software_node *nodes = sensor->swnodes;
+	unsigned int i = 0;
 
-	sensor->group[SWNODE_SENSOR_HID] = &nodes[SWNODE_SENSOR_HID];
-	sensor->group[SWNODE_SENSOR_PORT] = &nodes[SWNODE_SENSOR_PORT];
-	sensor->group[SWNODE_SENSOR_ENDPOINT] = &nodes[SWNODE_SENSOR_ENDPOINT];
-	sensor->group[SWNODE_IPU_PORT] = &nodes[SWNODE_IPU_PORT];
-	sensor->group[SWNODE_IPU_ENDPOINT] = &nodes[SWNODE_IPU_ENDPOINT];
-	if (sensor->vcm_type)
-		sensor->group[SWNODE_VCM] =  &nodes[SWNODE_VCM];
+	sensor->group[i++] = &nodes[SWNODE_SENSOR_HID];
+	sensor->group[i++] = &nodes[SWNODE_SENSOR_PORT];
+	sensor->group[i++] = &nodes[SWNODE_SENSOR_ENDPOINT];
+	sensor->group[i++] = &nodes[SWNODE_IPU_PORT];
+	sensor->group[i++] = &nodes[SWNODE_IPU_ENDPOINT];
 
 	if (sensor->csi_dev) {
-		sensor->group[SWNODE_IVSC_HID] =
-					&nodes[SWNODE_IVSC_HID];
-		sensor->group[SWNODE_IVSC_SENSOR_PORT] =
-					&nodes[SWNODE_IVSC_SENSOR_PORT];
-		sensor->group[SWNODE_IVSC_SENSOR_ENDPOINT] =
-					&nodes[SWNODE_IVSC_SENSOR_ENDPOINT];
-		sensor->group[SWNODE_IVSC_IPU_PORT] =
-					&nodes[SWNODE_IVSC_IPU_PORT];
-		sensor->group[SWNODE_IVSC_IPU_ENDPOINT] =
-					&nodes[SWNODE_IVSC_IPU_ENDPOINT];
-
-		if (sensor->vcm_type)
-			sensor->group[SWNODE_VCM] = &nodes[SWNODE_VCM];
-	} else {
-		if (sensor->vcm_type)
-			sensor->group[SWNODE_IVSC_HID] = &nodes[SWNODE_VCM];
+		sensor->group[i++] = &nodes[SWNODE_IVSC_HID];
+		sensor->group[i++] = &nodes[SWNODE_IVSC_SENSOR_PORT];
+		sensor->group[i++] = &nodes[SWNODE_IVSC_SENSOR_ENDPOINT];
+		sensor->group[i++] = &nodes[SWNODE_IVSC_IPU_PORT];
+		sensor->group[i++] = &nodes[SWNODE_IVSC_IPU_ENDPOINT];
 	}
+
+	if (nodes[SWNODE_VCM_GPIO].name)
+		sensor->group[i++] = &nodes[SWNODE_VCM_GPIO];
+	if (sensor->vcm_type)
+		sensor->group[i++] = &nodes[SWNODE_VCM];
+	sensor->group[i] = NULL;
 }
 
 static void ipu_bridge_create_connection_swnodes(struct ipu_bridge *bridge,
@@ -522,6 +537,7 @@ static void ipu_bridge_create_connection_swnodes(struct ipu_bridge *bridge,
 	}
 
 	nodes[SWNODE_VCM] = NODE_VCM(sensor->node_names.vcm);
+	nodes[SWNODE_VCM].properties = sensor->vcm_properties;
 
 	ipu_bridge_init_swnode_group(sensor);
 }
