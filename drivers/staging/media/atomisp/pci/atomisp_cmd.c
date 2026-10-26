@@ -3564,12 +3564,13 @@ static void atomisp_fill_pix_format(struct v4l2_pix_format *f,
 		f->field = V4L2_FIELD_NONE;
 
 	/*
-	 * FIXME: do we need to set this up differently, depending on the
-	 * sensor or the pipeline?
+	 * Match the default ISP RGB-to-YUV matrix and full-range output.
+	 * The RGB primaries and gamma transfer remain BT.709.
 	 */
 	f->colorspace = V4L2_COLORSPACE_REC709;
-	f->ycbcr_enc = V4L2_YCBCR_ENC_709;
+	f->ycbcr_enc = V4L2_YCBCR_ENC_601;
 	f->xfer_func = V4L2_XFER_FUNC_709;
+	f->quantization = V4L2_QUANTIZATION_FULL_RANGE;
 }
 
 /* Get sensor padding values for the non padded width x height resolution */
