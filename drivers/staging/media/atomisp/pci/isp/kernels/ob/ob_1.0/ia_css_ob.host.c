@@ -11,12 +11,16 @@
 
 #include "ia_css_ob.host.h"
 
+/*
+ * The OV sensors on this platform output a 64/1024 black pedestal
+ * (BLC target 0x40). Subtract it, or blacks turn grey and colour washes out.
+ */
 const struct ia_css_ob_config default_ob_config = {
-	IA_CSS_OB_MODE_NONE,
-	0,
-	0,
-	0,
-	0,
+	IA_CSS_OB_MODE_FIXED,
+	4096,
+	4096,
+	4096,
+	4096,
 	0,
 	0
 };

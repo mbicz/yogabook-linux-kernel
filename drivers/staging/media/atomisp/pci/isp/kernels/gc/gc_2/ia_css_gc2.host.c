@@ -15,9 +15,15 @@
 
 #include "ia_css_gc2.host.h"
 
+/*
+ * CCM2: YCgCo -> RGB with the OV2740 colour correction matrix folded in.
+ * Plain YCgCo->RGB leaves raw sensor colour almost unsaturated. The CCM is
+ * the 4136K matrix calibrated from the Intel OV2740 AIQB tuning, as published
+ * in the libcamera simple IPA ov2740.yaml. Rows still sum to 1 on grey.
+ */
 const struct ia_css_cc_config default_yuv2rgb_cc_config = {
-	12,
-	{4096, -4096, 4096, 4096, 4096, 0, 4096, -4096, -4096}
+	11,
+	{2048, -5467, 4042, 2048, 4665, -19, 2048, -5977, -3906}
 };
 
 const struct ia_css_cc_config default_rgb2yuv_cc_config = {
