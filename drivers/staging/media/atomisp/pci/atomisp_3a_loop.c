@@ -119,59 +119,109 @@ MODULE_PARM_DESC(ae_clip_deadband_permille,
 #define TONE_SLEW		8	/* Q8: tone lift slew per update */
 
 /*
- * Raw chromaticity (R/G, B/G; AWB_CHROMA_UNIT = 1.0) of a white surface seen
- * by the OV2740 under Planckian light, 2319K..6302K: the inverses of the
- * neutral gains in the AIQB-derived tuning of libcamera's simple IPA
- * ov2740.yaml (colourGains). The s3a statistics are taken after the OB stage
- * (default_ob_config), so they are already black-level corrected.
- *
- * Gray-world on the whole frame fails whenever the scene is not grey on
- * average: clipped windows and lamps read R = G = B and pull the gains towards
- * 1.0x (a strong green cast on this sensor), coloured objects pull towards
- * their complement. Instead:
- *  - drop clipped and near-black cells,
- *  - let only cells whose own chromaticity is near the white curve vote,
- *  - keep the result within AWB_TRANSVERSE of the curve (module-to-module and
- *    illuminant variation is real, a green or magenta "white" is not),
- *  - and converge smoothly.
+ * Raw chromaticity (R/G, B/G; AWB_CHROMA_UNIT = 1.0) of neutral surfaces.
+ * Statistics follow optical-black correction. Reject clipped/dark cells and
+ * coloured objects, constrain the result to the sensor's own white curve,
+ * and converge smoothly rather than applying whole-frame grey-world.
  */
 #define AWB_CHROMA_UNIT		4096
-static const struct {
+struct atomisp_awb_point {
 	s32 r, b;
-} awb_locus[] = {
-	{ 4054, 1465 },	/* 2319K */
-	{ 3247, 1720 },	/* 2854K */
-	{ 2927, 1690 },	/* 2884K */
-	{ 2618, 1834 },	/* 3239K */
-	{ 2293, 2172 },	/* 3865K */
-	{ 2155, 2161 },	/* 4136K */
-	{ 2089, 2492 },	/* 4939K */
-	{ 1813, 2918 },	/* 6302K */
 };
 
 /*
- * Per-sensor colour tuning. The locus above is the OV2740's; other sensors
- * scale it per channel (4096 = 1.0) to their own white response. The CCM is
- * pushed to the ISP (CCM2, YCgCo -> RGB) at the start of every stream so that
- * switching cameras switches tuning.
+ * Lenovo 01ov2740-yeti.aiqb ("OV2740 V11 tuning"), the front module's own
+ * factory tuning from the same S100043 firmware as the rear one.
+ * CMC_ChromaticityResponse (15), average responses: Q10 converted to Q12,
+ * ordered warm to cool.
  */
-struct atomisp_3a_tuning {
-	const char *sensor;		/* sensor subdev name prefix */
-	s32 locus_r, locus_b;		/* locus scale, 4096 = 1.0 */
+static const struct atomisp_awb_point ov2740_awb_locus[] = {
+	{ 3856, 1400 }, { 3128, 1520 }, { 2452, 1844 }, { 2244, 2052 },
+	{ 1776, 3008 },
+};
+
+/*
+ * Lenovo 00ov8858-yeti.aiqb, Lenovo_OV8858_IQ3.2PRC_20160428.
+ * CMC_ChromaticityResponse (15), average responses: Q10 R/G and B/G,
+ * converted to Q12 and ordered warm to cool. The high/low module-variation
+ * envelopes are not extra illuminants.
+ */
+static const struct atomisp_awb_point ov8858_awb_locus[] = {
+	{ 4344, 1680 }, { 4084, 1716 }, { 3720, 1784 }, { 3516, 1836 },
+	{ 3344, 1892 }, { 3140, 1972 }, { 2836, 2140 }, { 2600, 2328 },
+	{ 2484, 2448 }, { 2360, 2604 }, { 2248, 2772 }, { 2104, 3040 },
+	{ 2036, 3188 }, { 1976, 3352 }, { 1880, 3628 }, { 1804, 3884 },
+};
+
+struct atomisp_ccm_point {
+	struct atomisp_awb_point white;
 	struct ia_css_cc_config ccm;
+};
+
+/*
+ * Same AIQB, CMC_ColorMatrices (18): accurate RGB matrices, Q16.
+ * Compose with YCgCo -> RGB, then round to CCM2 Q11. Q11 keeps every
+ * coefficient within the ISP's [-8192, 8191] range. Neutral row sums are 1.
+ * The calibration white responses in this record use Q8, converted to Q12.
+ */
+static const struct atomisp_ccm_point ov8858_ccms[] = {
+	{ { 3568, 1808 },	/* A, incandescent */
+	  { 11, { 2048, -1629, 3653, 2048, 6923, 258,
+		  2048, -5699, -5570 } } },
+	{ { 2688, 2080 },	/* F11, TL84 */
+	  { 11, { 2048, -3921, 3813, 2048, 5889, 25,
+		  2048, -5045, -4445 } } },
+	{ { 2336, 2656 },	/* D50 */
+	  { 11, { 2048, -4800, 3843, 2048, 6117, 606,
+		  2048, -5066, -4063 } } },
+	{ { 2064, 2976 },	/* D65 */
+	  { 11, { 2048, -5160, 3953, 2048, 5904, 636,
+		  2048, -4641, -3682 } } },
+};
+
+/*
+ * Same front AIQB, CMC_ColorMatrices (18): accurate RGB matrices, folded and
+ * rounded exactly like the rear ones. Light sources by Intel CMC enum.
+ */
+static const struct atomisp_ccm_point ov2740_ccms[] = {
+	{ { 3152, 1584 },	/* 1, A, incandescent */
+	  { 11, { 2048, -2283, 3696, 2048, 6198, 42,
+		  2048, -5604, -4390 } } },
+	{ { 2576, 1984 },	/* 19, F11, TL84 */
+	  { 11, { 2048, -3726, 3673, 2048, 5460, -140,
+		  2048, -4980, -3811 } } },
+	{ { 2128, 1936 },	/* 17, F9 fluorescent */
+	  { 11, { 2048, -5292, 4393, 2048, 5330, -338,
+		  2048, -4055, -3629 } } },
+	{ { 1792, 3008 },	/* 6, D65 */
+	  { 11, { 2048, -5331, 4148, 2048, 5027, 499,
+		  2048, -4857, -3514 } } },
+};
+
+struct atomisp_3a_tuning {
+	const char *sensor;
+	const struct atomisp_awb_point *locus;
+	unsigned int num_locus;
+	struct ia_css_cc_config ccm;
+	const struct atomisp_ccm_point *ccms;
+	unsigned int num_ccms;
+	u32 black_level; /* u0.16 override; zero keeps the ISP default. */
 };
 
 static const struct atomisp_3a_tuning atomisp_3a_tunings[] = {
 	{
-		/* 4136K CCM from the AIQB-derived libcamera ov2740.yaml */
-		.sensor = "ov2740", .locus_r = 4096, .locus_b = 4096,
-		.ccm = { 11, { 2048, -5467, 4042, 2048, 4665, -19,
-			       2048, -5977, -3906 } },
+		.sensor = "ov2740",
+		.locus = ov2740_awb_locus,
+		.num_locus = ARRAY_SIZE(ov2740_awb_locus),
+		.ccms = ov2740_ccms,
+		.num_ccms = ARRAY_SIZE(ov2740_ccms),
 	}, {
-		/* No published OV8858 CCM: plain YCgCo -> RGB, no hue errors. */
-		.sensor = "ov8858", .locus_r = 4096, .locus_b = 4096,
-		.ccm = { 12, { 4096, -4096, 4096, 4096, 4096, 0,
-			       4096, -4096, -4096 } },
+		.sensor = "ov8858",
+		.locus = ov8858_awb_locus,
+		.num_locus = ARRAY_SIZE(ov8858_awb_locus),
+		.ccms = ov8858_ccms,
+		.num_ccms = ARRAY_SIZE(ov8858_ccms),
+		.black_level = 1024,
 	},
 };
 
@@ -188,7 +238,7 @@ atomisp_3a_tuning(struct atomisp_sub_device *asd)
 	return &atomisp_3a_tunings[0];
 }
 
-/* Per-pixel limits in the 13-bit ISP Bayer domain. */
+/* Per-pixel limits in the ISP Bayer domain, [0, 8191]. */
 #define AWB_SAT_LEVEL		6800	/* ~83% of 8191: clipped, no colour info */
 #define AWB_DARK_LEVEL		48	/* green below this is noise */
 #define AWB_GREY_TOL		410	/* grey-candidate cell: within 0.10 of curve */
@@ -203,11 +253,11 @@ static s64 atomisp_3a_awb_project(const struct atomisp_3a_tuning *t,
 	s64 best = S64_MAX, pr = *cr, pb = *cb, rr = *cr, rb = *cb;
 	unsigned int i;
 
-	for (i = 0; i + 1 < ARRAY_SIZE(awb_locus); i++) {
-		s64 ar = (s64)awb_locus[i].r * t->locus_r / 4096;
-		s64 ab = (s64)awb_locus[i].b * t->locus_b / 4096;
-		s64 dr = (s64)awb_locus[i + 1].r * t->locus_r / 4096 - ar;
-		s64 db = (s64)awb_locus[i + 1].b * t->locus_b / 4096 - ab;
+	for (i = 0; i + 1 < t->num_locus; i++) {
+		s64 ar = t->locus[i].r;
+		s64 ab = t->locus[i].b;
+		s64 dr = t->locus[i + 1].r - ar;
+		s64 db = t->locus[i + 1].b - ab;
 		s64 len = dr * dr + db * db;
 		s64 k = (pr - ar) * dr + (pb - ab) * db;
 		s64 qr, qb, d;
@@ -231,6 +281,53 @@ static s32 atomisp_3a_awb_ratio(u64 num, u64 den)
 {
 	return min_t(u64, div64_u64(num * AWB_CHROMA_UNIT, den),
 		     4 * AWB_CHROMA_UNIT);
+}
+
+/*
+ * Interpolate the rear's CCM at the applied (smoothed) white balance, not the
+ * noisy instantaneous estimate. Clamp to the nearest calibrated segment at
+ * either end; do not extrapolate matrices beyond the measured illuminants.
+ */
+static void atomisp_3a_ccm(const struct atomisp_3a_tuning *t, u32 r, u32 b,
+			   struct ia_css_cc_config *ccm)
+{
+	s64 pr, pb;
+	s64 best = S64_MAX, weight = 0;
+	unsigned int segment = 0, i, j;
+
+	if (!t->ccms) {
+		*ccm = t->ccm;
+		return;
+	}
+	pr = (u64)AWB_UNIT * AWB_CHROMA_UNIT / r;
+	pb = (u64)AWB_UNIT * AWB_CHROMA_UNIT / b;
+
+	for (i = 0; i + 1 < t->num_ccms; i++) {
+		s64 ar = t->ccms[i].white.r;
+		s64 ab = t->ccms[i].white.b;
+		s64 dr = t->ccms[i + 1].white.r - ar;
+		s64 db = t->ccms[i + 1].white.b - ab;
+		s64 len = dr * dr + db * db;
+		s64 k = clamp_t(s64, (pr - ar) * dr + (pb - ab) * db, 0, len);
+		s64 qr = ar + div64_s64(dr * k, len);
+		s64 qb = ab + div64_s64(db * k, len);
+		s64 distance = (pr - qr) * (pr - qr) + (pb - qb) * (pb - qb);
+
+		if (distance < best) {
+			best = distance;
+			segment = i;
+			weight = div64_s64(k * AWB_CHROMA_UNIT, len);
+		}
+	}
+
+	ccm->fraction_bits = 11;
+	for (j = 0; j < ARRAY_SIZE(ccm->matrix); j++) {
+		s32 a = t->ccms[segment].ccm.matrix[j];
+		s32 z = t->ccms[segment + 1].ccm.matrix[j];
+
+		ccm->matrix[j] = a + div_s64((s64)(z - a) * weight,
+					     AWB_CHROMA_UNIT);
+	}
 }
 
 /*
@@ -283,6 +380,9 @@ static void atomisp_3a_tone(struct atomisp_sub_device *asd, u32 a)
  * Install the selected sensor's parameters before the first frame, even with
  * AWB disabled. Keep the persistent cache in step with CSS so later parameter
  * commits cannot restore the previous sensor's white balance or colour matrix.
+ *
+ * The OV8858 pedestal is 16/1024, not the OV2740 default of 64/1024.
+ * Subtracting 64 folds the rear's dark Bayer values and solarizes colours.
  */
 void atomisp_3a_loop_init(struct atomisp_sub_device *asd)
 {
@@ -294,8 +394,15 @@ void atomisp_3a_loop_init(struct atomisp_sub_device *asd)
 		return;
 
 	asd->params.css_param.wb_config = default_wb_config;
-	asd->params.css_param.yuv2rgb_cc_config = tun->ccm;
+	atomisp_3a_ccm(tun, default_wb_config.r, default_wb_config.b,
+		       &asd->params.css_param.yuv2rgb_cc_config);
 	*ob = default_ob_config;
+	if (tun->black_level) {
+		ob->level_gr = tun->black_level;
+		ob->level_r = tun->black_level;
+		ob->level_b = tun->black_level;
+		ob->level_gb = tun->black_level;
+	}
 	/* Recovery also reaches this path without the normal stream-on ioctl. */
 	asd->awb_r = 0;
 	asd->awb_b = 0;
@@ -418,13 +525,19 @@ static void atomisp_3a_awb(struct atomisp_sub_device *asd,
 	wb.r = new_r;
 	wb.b = new_b;
 
-	if (first) {
-		asd->params.css_param.yuv2rgb_cc_config = tun->ccm;
-		asd->params.config.yuv2rgb_cc_config =
-			&asd->params.css_param.yuv2rgb_cc_config;
-		asd->params.css_param.update_flag.yuv2rgb_cc_config =
-			(struct atomisp_cc_config *)
-			&asd->params.css_param.yuv2rgb_cc_config;
+	if (first || tun->ccms) {
+		struct ia_css_cc_config ccm;
+
+		atomisp_3a_ccm(tun, new_r, new_b, &ccm);
+		if (first || memcmp(&asd->params.css_param.yuv2rgb_cc_config,
+				    &ccm, sizeof(ccm))) {
+			asd->params.css_param.yuv2rgb_cc_config = ccm;
+			asd->params.config.yuv2rgb_cc_config =
+				&asd->params.css_param.yuv2rgb_cc_config;
+			asd->params.css_param.update_flag.yuv2rgb_cc_config =
+				(struct atomisp_cc_config *)
+				&asd->params.css_param.yuv2rgb_cc_config;
+		}
 	}
 
 	memcpy(&asd->params.css_param.wb_config, &wb, sizeof(wb));
