@@ -3825,10 +3825,11 @@ int atomisp_try_fmt(struct atomisp_device *isp, struct v4l2_pix_format *f,
 	}
 
 	/*
-	 * The preview pipeline does not support width > 1920. Also limit height
-	 * to avoid sensor drivers still picking a too wide resolution.
+	 * VF_PP conversion is limited to 1920 pixels. Native NV12 preview can
+	 * bypass it when digital zoom is disabled, retaining the preview 3A path.
 	 */
-	if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW) {
+	if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW &&
+	    (f->pixelformat != V4L2_PIX_FMT_NV12 || !asd->disable_dz->val)) {
 		f->width = min(f->width, 1920U);
 		f->height = min(f->height, 1440U);
 	}
@@ -4400,6 +4401,24 @@ int atomisp_set_fmt(struct video_device *vdev, struct v4l2_format *f)
 	atomisp_csi_lane_config(isp);
 
 	atomisp_check_copy_mode(asd, &f->fmt.pix);
+
+	/*
+	 * Native NV12 preview without digital zoom bypasses VF_PP only when
+	 * the preview binary output equals its effective input. Crop the
+	 * sink to the requested size instead of requiring a scaler.
+	 */
+	if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW &&
+	    f->fmt.pix.pixelformat == V4L2_PIX_FMT_NV12 && asd->disable_dz->val) {
+		struct v4l2_rect native = {
+			.width = f->fmt.pix.width,
+			.height = f->fmt.pix.height,
+		};
+
+		atomisp_subdev_set_selection(&asd->subdev, NULL,
+					     V4L2_SUBDEV_FORMAT_ACTIVE,
+					     ATOMISP_SUBDEV_PAD_SINK,
+					     V4L2_SEL_TGT_CROP, 0, &native);
+	}
 
 	isp_sink_crop = *atomisp_subdev_get_rect(&asd->subdev, NULL,
 			V4L2_SUBDEV_FORMAT_ACTIVE,

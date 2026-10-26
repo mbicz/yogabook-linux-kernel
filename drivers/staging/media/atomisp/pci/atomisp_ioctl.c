@@ -558,8 +558,8 @@ static int atomisp_enum_framesizes(struct file *file, void *priv,
 		return atomisp_enum_framesizes_crop(isp, fsize);
 
 	/*
-	 * Report only sizes atomisp_try_fmt() will actually deliver: the
-	 * preview pipeline is limited to 1920x1440, and widths are kept a
+	 * Report sizes atomisp_try_fmt() can deliver. Native NV12 without
+	 * digital zoom bypasses the preview VF_PP size limit. Keep widths a
 	 * multiple of 64 so planar YUV420 rows need no padding (consumers such
 	 * as GStreamer's pipewiresrc mis-compute padded chroma strides).
 	 */
@@ -575,6 +575,7 @@ static int atomisp_enum_framesizes(struct file *file, void *priv,
 		width = ALIGN_DOWN(fse.max_width - pad_w, 64);
 		height = fse.max_height - pad_h;
 		if (asd->run_mode->val == ATOMISP_RUN_MODE_PREVIEW &&
+		    (fsize->pixel_format != V4L2_PIX_FMT_NV12 || !asd->disable_dz->val) &&
 		    (width > 1920 || height > 1440))
 			continue;
 		if (valid++ == fsize->index)
