@@ -1864,6 +1864,33 @@ static void vlv_dsi_lenovo_yoga_tab3_backlight_fixup(struct intel_dsi *intel_dsi
 	connector->panel.vbt.dsi.sequence[MIPI_SEQ_BACKLIGHT_OFF] = backlight_off_sequence;
 }
 
+/*
+ * On the Lenovo Yoga Book YB1-X90F/L (YETI-11):
+ * 1. The VBT selects the SoC PWM for the backlight, but the LP8557 takes its
+ *    PWM input from the panel's controller and is driven over I2C by lp855x.
+ *    The SoC PWM output is not connected, so there is no i915 backlight.
+ * 2. The only BACKLIGHT_ON element after a 120 ms delay writes LP8557 BL_CMD
+ *    = BL_ON on VBT I2C bus 3, meaning ACPI I2C4. That is another Linux
+ *    adapter, which is not even registered yet when the panel is first
+ *    enabled. lp855x already sets BL_ON and there is no BACKLIGHT_OFF
+ *    sequence clearing it, so keep only the delay.
+ */
+static void vlv_dsi_lenovo_yoga_book_backlight_fixup(struct intel_dsi *intel_dsi)
+{
+	static const u8 backlight_on_sequence[12] = {
+		/* Header Seq-id 6, length after header 7 bytes */
+		0x06, 0x07, 0x00, 0x00, 0x00,
+		/* MIPI_SEQ_ELEM_DELAY 120000 us */
+		0x02, 0x04, 0xc0, 0xd4, 0x01, 0x00,
+		/* MIPI_SEQ_ELEM_END */
+		0x00
+	};
+	struct intel_connector *connector = intel_dsi->attached_connector;
+
+	connector->panel.vbt.backlight.present = false;
+	connector->panel.vbt.dsi.sequence[MIPI_SEQ_BACKLIGHT_ON] = backlight_on_sequence;
+}
+
 static const struct dmi_system_id vlv_dsi_dmi_quirk_table[] = {
 	{
 		/* Asus Transformer Pad TF103C */
@@ -1894,6 +1921,15 @@ static const struct dmi_system_id vlv_dsi_dmi_quirk_table[] = {
 			DMI_MATCH(DMI_PRODUCT_VERSION, "Blade3-10A-001"),
 		},
 		.driver_data = (void *)vlv_dsi_lenovo_yoga_tab3_backlight_fixup,
+	},
+	{
+		/* Lenovo Yoga Book YB1-X90F/L */
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "YETI-11"),
+		},
+		.driver_data = (void *)vlv_dsi_lenovo_yoga_book_backlight_fixup,
 	},
 	{ }
 };
