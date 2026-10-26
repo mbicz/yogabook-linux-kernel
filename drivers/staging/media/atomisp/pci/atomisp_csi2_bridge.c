@@ -11,6 +11,8 @@
 
 #include <linux/acpi.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/clkdev.h>
 #include <linux/device.h>
 #include <linux/dmi.h>
 #include <linux/platform_data/x86/int3472.h>
@@ -364,11 +366,57 @@ static const struct acpi_device_id atomisp_sensor_configs[] = {
 	{}
 };
 
+/*
+ * Some boards (Lenovo Yoga Book YB1-X90F rear camera) have no PMC clock in
+ * the sensor's _PR0, so ACPI never turns the clock on. Take the clock number
+ * from the "CamClk" _DSM/EFI value instead and register a clkdev lookup, so
+ * the sensor driver can get and enable the clock itself.
+ */
+static int atomisp_csi2_add_pmc_clk_lookup(struct acpi_device *adev, int clock_num)
+{
+	struct clk *clk;
+	struct clk_hw *hw;
+	char name[14];
+	char sensor_name[sizeof("i2c-") + MAX_ACPI_DEVICE_NAME_LEN];
+	int ret;
+
+	snprintf(sensor_name, sizeof(sensor_name), I2C_DEV_NAME_FORMAT,
+		 acpi_dev_name(adev));
+
+	/* Bridge probe may retry after registering a sensor's clock. */
+	clk = clk_get_sys(sensor_name, NULL);
+	if (!IS_ERR(clk)) {
+		clk_put(clk);
+		return 0;
+	}
+
+	snprintf(name, sizeof(name), "pmc_plt_clk_%d", clock_num);
+
+	clk = clk_get(NULL, name);
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
+
+	/*
+	 * The lookup follows the ACPI sensor, not the ISP driver: the bridge
+	 * graph and GPIO mappings also survive ISP unbind/rebind. Use the
+	 * clock core's cleanup so it remains valid if this module is unloaded.
+	 */
+	hw = __clk_get_hw(clk);
+	ret = devm_clk_hw_register_clkdev(&adev->dev, hw, NULL, sensor_name);
+	clk_put(clk);
+	if (ret)
+		return ret;
+
+	acpi_handle_info(adev->handle, "%s: no PMC clk in _PR0, providing %s to the sensor driver\n",
+			 dev_name(&adev->dev), name);
+	return 0;
+}
+
 static int atomisp_csi2_parse_sensor_fwnode(struct acpi_device *adev,
 					    struct ipu_sensor *sensor)
 {
 	const struct acpi_device_id *id;
-	int ret, clock_num;
+	int ret, clock_num, cam_clk = -1;
 	bool vcm = false;
 	int lanes = 1;
 
@@ -393,6 +441,16 @@ static int atomisp_csi2_parse_sensor_fwnode(struct acpi_device *adev,
 	if (ret)
 		return ret;
 
+	if (clock_num < 0) {
+		cam_clk = gmin_cfg_get_int(adev, "CamClk", -1);
+
+		if (cam_clk >= 0 && cam_clk <= 4) {
+			ret = atomisp_csi2_set_pmc_clk_freq(adev, cam_clk);
+			if (ret)
+				return ret;
+		}
+	}
+
 	sensor->link = atomisp_csi2_get_port(adev, clock_num);
 	if (sensor->link >= ATOMISP_CAMERA_NR_PORTS) {
 		acpi_handle_err(adev->handle, "%s: Invalid port: %u\n",
@@ -410,6 +468,12 @@ static int atomisp_csi2_parse_sensor_fwnode(struct acpi_device *adev,
 	ret = atomisp_csi2_add_gpio_mappings(adev);
 	if (ret)
 		return ret;
+
+	if (cam_clk >= 0 && cam_clk <= 4) {
+		ret = atomisp_csi2_add_pmc_clk_lookup(adev, cam_clk);
+		if (ret)
+			return ret;
+	}
 
 	sensor->mclkspeed = PMC_CLK_RATE_19_2MHZ;
 	sensor->rotation = 0;
